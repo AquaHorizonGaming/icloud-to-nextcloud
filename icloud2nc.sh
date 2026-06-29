@@ -22,6 +22,8 @@ ASSUME_YES="${ASSUME_YES:-0}"
 
 EXIFTOOL="${WORK}/tools/bin/exiftool"
 FFMPEG="${WORK}/tools/bin/ffmpeg"; FFPROBE="${WORK}/tools/bin/ffprobe"
+EXIFTOOL_URL="${EXIFTOOL_URL:-https://exiftool.org/Image-ExifTool-13.30.tar.gz}"
+FFMPEG_URL="${FFMPEG_URL:-https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz}"
 STATE="${WORK}/state"; LOGDIR="${WORK}/logs"; LIBDIR="${WORK}/lib"
 LOG="${LOGDIR}/icloud2nc-$(date +%Y%m%d).log"
 LOCK="${WORK}/.lock"
@@ -86,25 +88,32 @@ doctor(){ local fail=0
   [ $fail -eq 0 ] && ok "preflight passed" || warn "preflight found issues (above)"; return 0; }
 
 tools(){
-  if [ ! -x "$WORK/tools/exiftool/exiftool" ]; then log "cloning exiftool (pure perl, no root)"
-    git clone --depth 1 https://github.com/exiftool/exiftool.git "$WORK/tools/exiftool" 2>&1 | tail -1; fi
-  mkdir -p "$WORK/tools/bin"; ln -sf "$WORK/tools/exiftool/exiftool" "$EXIFTOOL"
-  if [ ! -x "$FFMPEG" ]; then log "fetching static ffmpeg/ffprobe"
-    curl -fsSL -o "$WORK/tools/ff.tar.xz" https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz || die "ffmpeg download failed"
+  if command -v exiftool >/dev/null 2>&1; then ln -sf "$(command -v exiftool)" "$EXIFTOOL"
+  elif [ ! -x "$EXIFTOOL" ]; then log "fetching exiftool from exiftool.org"
+    mkdir -p "$WORK/tools/bin"
+    curl -fsSL -o "$WORK/tools/et.tgz" "$EXIFTOOL_URL" || die "exiftool download failed (set EXIFTOOL_URL)"
+    tar -xzf "$WORK/tools/et.tgz" -C "$WORK/tools"
+    local ed; ed=$(find "$WORK/tools" -maxdepth 1 -type d -name 'Image-ExifTool-*' | head -1)
+    ln -sf "$ed/exiftool" "$EXIFTOOL"; rm -f "$WORK/tools/et.tgz"; fi
+  if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+    ln -sf "$(command -v ffmpeg)" "$FFMPEG"; ln -sf "$(command -v ffprobe)" "$FFPROBE"
+  elif [ ! -x "$FFMPEG" ]; then log "fetching static ffmpeg/ffprobe"
+    mkdir -p "$WORK/tools/bin"
+    curl -fsSL -o "$WORK/tools/ff.tar.xz" "$FFMPEG_URL" || die "ffmpeg download failed (set FFMPEG_URL)"
     tar -xf "$WORK/tools/ff.tar.xz" -C "$WORK/tools"
-    local d; d=$(find "$WORK/tools" -maxdepth 1 -type d -name 'ffmpeg-*linux64*' | head -1)
-    cp "$d/bin/ffmpeg" "$d/bin/ffprobe" "$WORK/tools/bin/"; rm -rf "$WORK/tools/ff.tar.xz" "$d"; fi
+    local fd; fd=$(find "$WORK/tools" -maxdepth 1 -type d -name 'ffmpeg-*static*' | head -1)
+    cp "$fd/ffmpeg" "$fd/ffprobe" "$WORK/tools/bin/"; rm -rf "$WORK/tools/ff.tar.xz" "$fd"; fi
   "$EXIFTOOL" -ver >/dev/null && "$FFMPEG" -version >/dev/null || die "tool self-test failed"
   occ config:system:set preview_ffmpeg_path --value="$FFMPEG" >/dev/null
   occ config:system:set memories.vod.ffmpeg --value="$FFMPEG" >/dev/null
   occ config:system:set memories.vod.ffprobe --value="$FFPROBE" >/dev/null
-  ok "exiftool $($EXIFTOOL -ver) + ffmpeg installed and wired into Memories"; }
+  ok "exiftool $($EXIFTOOL -ver) + ffmpeg ready and wired into Memories"; }
 
 links(){ cat <<'EOF'
 Collect all part links without 21 manual copies:
   1. Log in to https://privacy.apple.com yourself (Apple password + 2FA -- only you can).
   2. Open the data-download page listing the "iCloud Photos Part N" files.
-  3. DevTools (F12) -> Console -> paste get_links.js (in this repo) -> Enter.
+  3. DevTools (F12) -> Console -> paste get_links.js (included with this tool) -> Enter.
   4. Save the printed lines to ~/icloud_migration/parts.txt, then run: download
 NOTE: Apple links expire within minutes; download right away.
 The Apple login is never automated: it needs your password + 2FA, and scripting
