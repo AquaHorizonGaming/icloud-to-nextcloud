@@ -57,6 +57,14 @@ Many videos export with a junk `0000:00:00` date, so Memories dumps them at "tod
 | `logs`     | Tail the run log |
 | `resume`   | Re-run only the stages not yet marked complete |
 | `all`      | Guided full run end-to-end |
+| `backup`   | Dump the database + config before destructive steps |
+| `dedupe`   | Find duplicate media by content hash (`dedupe --remove` deletes extras) |
+| `faces`    | Cluster faces into People (Recognize) |
+| `hwaccel`  | Enable GPU/VAAPI transcoding if `/dev/dri` exists |
+| `contacts` | Merge exported vCards into one file for import (`--strip-photos` optional) |
+| `calendars`| Collect exported `.ics` files for import |
+| `prune`    | Delete the downloaded part zips to reclaim space |
+| `clean`    | Clear scratch (metadata/state/logs) — library untouched |
 
 Run with **no argument** for an interactive menu. Every stage is **resumable** (state under `~/icloud_migration/state/`), fully **logged** (`~/icloud_migration/logs/`), and guarded by a **run-lock** so two heavy runs can't collide.
 
@@ -122,6 +130,14 @@ The Apple login is **never automated** — it needs your password + 2FA, and scr
 3. Photos with GPS are reverse-geocoded automatically (after `extras`).
 
 ---
+
+## Power-user options
+
+- **External config** — drop settings in `~/.config/icloud2nc.conf` (or point `ICLOUD2NC_CONF` at a file) instead of editing the script; it's sourced at startup.
+- **`--yes`** — skip confirmation prompts (for unattended runs).
+- **`--dry-run`** — destructive commands (`prune`, `clean`, `dedupe --remove`) print what they'd do without doing it.
+
+Example: `./icloud2nc.sh --yes import`  ·  `./icloud2nc.sh --dry-run dedupe --remove`
 
 ## Troubleshooting
 

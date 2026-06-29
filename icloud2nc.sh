@@ -6,7 +6,8 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.0"
+VERSION="2.1"
+[ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ============================== CONFIG ======================================
 NC_USER="${NC_USER:-Aqua}"
@@ -42,6 +43,7 @@ err(){  printf '%s %s\n' "${E}[$(_ts)] ERROR${R}" "$*" | tee -a "$LOG" >&2; }
 die(){ err "$*"; release_lock; exit 1; }
 banner(){ printf '\n%s== %s ==%s\n' "$B" "$*" "$R" | tee -a "$LOG"; }
 confirm(){ [ "$ASSUME_YES" = 1 ] && return 0; read -r -p "$* [y/N] " a; [[ "$a" =~ ^[Yy]$ ]]; }
+maybe(){ if [ "${DRY:-0}" = 1 ]; then echo "  [dry-run] $*"; else "$@"; fi; }
 
 acquire_lock(){ if mkdir "$LOCK" 2>/dev/null; then echo $$ >"$LOCK/pid"; trap release_lock EXIT INT TERM
   else local p; p=$(cat "$LOCK/pid" 2>/dev/null); if kill -0 "$p" 2>/dev/null; then die "another run active (pid $p); remove $LOCK if stale"; else rm -rf "$LOCK"; acquire_lock; fi; fi; }
@@ -85,6 +87,9 @@ doctor(){ local fail=0
   echo "  ffmpeg       : $([ -x "$FFMPEG" ] && echo ok || echo 'missing -> run: tools')"
   echo "  data free    : $(free_gb "$NC_FILES") GB"
   echo "  GPU /dev/dri : $([ -d /dev/dri ] && echo yes || echo 'none (software transcode; fine on many cores)')"
+  echo "  php mem_limit: $(php -r 'echo ini_get(\"memory_limit\");' 2>/dev/null)"
+  echo "  memcache     : $(_dbget memcache.local || echo 'unset (set \\OC\\Memcache\\APCu for speed)')"
+  occ maintenance:mode 2>/dev/null | grep -qi 'enabled: *true' && warn "maintenance mode is ON (occ maintenance:mode --off)"
   [ $fail -eq 0 ] && ok "preflight passed" || warn "preflight found issues (above)"; return 0; }
 
 tools(){
@@ -260,15 +265,67 @@ menu(){ while true; do
   cat <<'M'
   1) doctor    2) tools    3) links    4) download   5) import
   6) albums    7) extras   8) crons    9) status    10) verify
- 11) report   12) all      q) quit
+ 11) report   12) all     13) backup   14) dedupe   15) faces
+ 16) hwaccel  17) contacts 18) calendars 19) prune  20) clean   q) quit
 M
   read -r -p "choose: " ch; case "$ch" in
     1) doctor;; 2) acquire_lock; tools; release_lock;; 3) links;; 4) acquire_lock; download; release_lock;;
     5) acquire_lock; import; release_lock;; 6) acquire_lock; albums; release_lock;; 7) acquire_lock; extras; release_lock;;
-    8) crons;; 9) status;; 10) verify;; 11) report;; 12) all;; q|Q) break;; *) warn "?";; esac
+    8) crons;; 9) status;; 10) verify;; 11) report;; 12) all;;
+    13) acquire_lock; backup; release_lock;; 14) acquire_lock; dedupe; release_lock;; 15) faces;;
+    16) hwaccel;; 17) contacts;; 18) calendars;; 19) acquire_lock; prune; release_lock;; 20) clean;;
+    q|Q) break;; *) warn "?";; esac
   done; }
 
 usage(){ sed -n '2,8p' "$0"; }
+
+
+backup(){ local d="$WORK/backups/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$d"
+  log "backing up DB + config -> $d"
+  local u pw n; u=$(_dbget dbuser); pw=$(_dbget dbpassword); n=$(_dbget dbname)
+  mysqldump --single-transaction --no-tablespaces -h"$DB_HOST" -P"$DB_PORT" -u"$u" -p"$pw" "$n" > "$d/nextcloud-db.sql" 2>/dev/null \
+    && ok "DB -> $d/nextcloud-db.sql ($(du -h "$d/nextcloud-db.sql"|cut -f1))" || warn "DB dump failed"
+  cp -f "$(dirname "${OCC##* }")/config/config.php" "$d/" 2>/dev/null
+  [ -d "$WORK/metadata/Albums" ] && cp -rf "$WORK/metadata/Albums" "$d/albums-metadata"
+  ok "backup complete: $d"; }
+
+dedupe(){ banner "Duplicate scan (by content hash)"; local tmp; tmp=$(mktemp)
+  log "hashing library (this can take a while on large sets)"
+  find "$ICLOUD_DIR" -type f -exec md5sum {} + 2>/dev/null | sort > "$tmp"
+  local groups extra; groups=$(awk '{print $1}' "$tmp" | uniq -d | wc -l)
+  extra=$(awk '{print $1}' "$tmp" | uniq -dc | awk '{s+=$1-1} END{print s+0}')
+  echo "  duplicate groups : $groups"; echo "  redundant copies : $extra"
+  if [ "${1:-}" = "--remove" ] && [ "$extra" -gt 0 ]; then
+    confirm "Delete $extra redundant copies (keep one of each)?" || { rm -f "$tmp"; return 0; }
+    awk '{h=$1; $1=""; sub(/^ /,""); if(h==p) print; else p=h}' "$tmp" | while IFS= read -r ff; do maybe rm -f "$ff"; done
+    occ files:scan --path="${NC_USER}/files/${REL_ICLOUD}" >/dev/null 2>&1; ok "removed duplicates and re-scanned"
+  else echo "  (run: dedupe --remove  to delete extras, keeping one each)"; fi; rm -f "$tmp"; }
+
+faces(){ log "clustering faces (Recognize -> Memories People)"
+  occ recognize:cluster-faces 2>&1 | nostderr | tail -3; ok "face clustering run (see Memories -> People)"; }
+
+hwaccel(){ if [ -d /dev/dri ]; then occ config:system:set memories.vod.vaapi --value=true --type=boolean >/dev/null
+    ok "VAAPI hardware transcoding enabled (/dev/dri present)"
+  else warn "no /dev/dri -> software transcoding only (fine on many cores)"; fi; }
+
+contacts(){ local out="$WORK/merged-contacts.vcf"; : > "$out"; local n=0
+  while IFS= read -r ff; do cat "$ff" >> "$out"; echo >> "$out"; n=$((n+1)); done < <(find "$WORK" -iname '*.vcf' ! -path "$out" 2>/dev/null)
+  if [ "${1:-}" = "--strip-photos" ]; then awk 'skip&&/^[^ ]/{skip=0} /^PHOTO/{skip=1} !skip' "$out" > "$out.t" && mv "$out.t" "$out"; fi
+  [ "$n" -gt 0 ] && ok "merged $n vCard file(s) -> $out  (Nextcloud Contacts -> Settings -> Import)" || warn "no .vcf files found under $WORK"; }
+
+calendars(){ local d="$WORK/calendars"; mkdir -p "$d"; local n=0
+  while IFS= read -r ff; do cp -f "$ff" "$d/"; n=$((n+1)); done < <(find "$WORK" -iname '*.ics' 2>/dev/null)
+  [ "$n" -gt 0 ] && ok "collected $n .ics file(s) -> $d  (Nextcloud Calendar -> Settings -> Import)" || warn "no .ics files found under $WORK"; }
+
+prune(){ confirm "Delete the downloaded part zips in $WORK/incoming to reclaim space?" || { warn "cancelled"; return 0; }
+  local b; b=$(du -sh "$WORK/incoming" 2>/dev/null | cut -f1); maybe rm -f "$WORK"/incoming/*.zip; ok "removed downloaded zips (freed ~${b:-0})"; }
+
+clean(){ confirm "Remove scratch (metadata/state/logs)? Your photo library is NOT touched." || { warn "cancelled"; return 0; }
+  maybe rm -rf "$WORK/metadata" "$STATE"; maybe rm -f "$LOGDIR"/*.log; ok "scratch cleared"; }
+
+
+DRY="${DRY:-0}"
+while true; do case "${1:-}" in -y|--yes) ASSUME_YES=1; shift;; --dry-run) DRY=1; shift;; *) break;; esac; done
 
 case "${1:-menu}" in
   doctor) doctor;; tools) acquire_lock; tools; release_lock;; links) links;;
@@ -276,5 +333,8 @@ case "${1:-menu}" in
   import) acquire_lock; import; release_lock;; albums) acquire_lock; albums; release_lock;;
   archive) acquire_lock; archive; release_lock;; extras) acquire_lock; extras; release_lock;;
   crons) crons;; status) status;; verify) verify;; report) report;; logs) shift; logs "${1:-40}";;
+  backup) acquire_lock; backup; release_lock;; dedupe) shift; acquire_lock; dedupe "${1:-}"; release_lock;;
+  faces) faces;; hwaccel) hwaccel;; contacts) shift; contacts "${1:-}";; calendars) calendars;;
+  prune) acquire_lock; prune; release_lock;; clean) clean;;
   resume) resume;; all) all;; menu) menu;; help|-h|--help) usage;; *) err "unknown: $1"; usage;;
 esac
