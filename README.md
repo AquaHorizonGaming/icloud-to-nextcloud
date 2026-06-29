@@ -1,218 +1,113 @@
-# iCloud to Nextcloud Migration Guide
+# iCloud → Nextcloud Migration (Pro Edition)
 
-This guide documents the process of migrating data from iCloud to Nextcloud, based on personal experience. It includes scripts and step-by-step instructions that may be helpful in your migration journey.
+A battle-tested toolkit for migrating an **iCloud Photos** export into **Nextcloud + the Memories app**, including everything the original guides leave out. Built and proven on a real ~500 GB / ~54,000-item library.
 
-## Who This Guide Is For
+> Improves on [platelminto/icloud-to-nextcloud](https://github.com/platelminto/icloud-to-nextcloud) with the fixes that actually matter at scale: encryption handling, fast video-date repair, server-side parallel downloads, real Favorites/Hidden mapping, album folders **and** Memories albums kept in sync, geocoding, and a self-maintaining "new photos" pipeline.
 
-This guide is intended for users who are:
-- Comfortable with command-line interfaces
-- Familiar with Docker and Linux environments
-- Possibly new to Nextcloud but experienced with general tech setups
-- Looking to migrate their data from iCloud to a self-hosted Nextcloud instance
+---
 
-Note that this guide reflects a personal migration process and may not cover all scenarios. You might need to adapt some steps to your specific situation.
+## ⚠️ Read this first — the gotchas that will waste your time
 
-## Table of Contents
-1. [Setting Up Nextcloud](#setting-up-nextcloud)
-   - [Setting Up Memories in Nextcloud](#setting-up-memories-in-nextcloud)
-2. [Downloading iCloud Data](#downloading-icloud-data)
-3. [Data Migration Process](#data-migration-process)
-   - [Calendars](#calendars)
-   - [Contacts](#contacts)
-   - [Photos](#photos)
-4. [Connecting Devices to Nextcloud](#connecting-devices-to-nextcloud)
-   - [Linux](#linux)
-   - [Android](#android)
+These are the things that broke (or nearly broke) the migration and cost hours to diagnose. Handle them up front.
 
-## Setting Up Nextcloud
+### 1. Server-side encryption must be OFF
+If Nextcloud **server-side encryption** is enabled, the files on disk are AES-encrypted. Consequences:
+- **Memories video transcoding silently fails** — `go-vod` reads files straight off disk and can't decrypt them, so HEVC playback is broken/slow.
+- You **cannot** place files directly into the data directory (Nextcloud rejects unencrypted files).
+- Everything is slower (per-read decryption).
 
-Before beginning the migration process, it's recommended to set up your Nextcloud instance:
+Check: `occ encryption:status`. If enabled, decrypt (master-key mode needs no user passwords):
+```bash
+occ encryption:decrypt-all      # answer "yes"; runs in single-user mode
+occ encryption:disable
+occ app:disable encryption
+```
+**Back up first** (DB + data). This is a one-way, instance-wide operation. If interrupted you can re-run `decrypt-all`.
 
-1. For ease of installation and maintenance, consider using Nextcloud AIO (All-In-One). You can find more information and installation instructions at [https://github.com/nextcloud/all-in-one](https://github.com/nextcloud/all-in-one).
+### 2. Videos lose their dates too — but DON'T use exiftool to fix them
+Many videos (TikToks, screen recordings, re-encodes) export with a **`0000:00:00` CreateDate**, so Memories dumps them at "today." The obvious fix — rewriting QuickTime tags with exiftool — is a **trap**: on networked/seedbox storage it rewrites the whole file and runs at ~40s/file (days for thousands of videos).
 
-2. After setting up Nextcloud, proceed to set up the Memories app as described in the next section.
+**Do this instead:** set the file's **modification time** to the real date (instant — no rewrite). Memories uses file mtime as its date fallback when there's no EXIF date. Then `files:scan` + `memories:index`. See `fix_video_dates.py`. (Photos are different — see #3.)
 
-### Setting Up Memories in Nextcloud
+### 3. Photos lose EXIF → restore in ONE batch
+Apple strips EXIF from exported **photos**. Restore `DateTimeOriginal`/`CreateDate` from the `Photo Details*.csv` files, but do it as a **single `exiftool -csv=` batch**, not per-file — orders of magnitude faster. See `build_photo_dates.py`.
 
-The Memories app in Nextcloud is highly recommended for managing your photo collection, especially when migrating from iCloud. Here's why it's important:
+### 4. The export layout (varies, but this is common)
+- Parts come as `iCloud Photos Part N of 21.zip`. Apple may **front-load videos** into the early parts and put the **photos in later parts** — don't assume part order.
+- Each part's `Photos/` holds its media **and** its own `Photo Details*.csv` (per-part metadata).
+- The **`Albums/` folder lives in ONE part** (usually Part 1) — it has one CSV per album (incl. `Favorites.csv`, `Hidden.csv`). Album CSV filenames are sometimes **quoted** — strip the quotes.
+- `Memories/` CSVs are Apple's auto-generated "memory" slideshows — **skip them** (Nextcloud Memories makes its own).
 
-- It provides features similar to what you're used to in iCloud, such as timeline view, face recognition, and location-based browsing.
-- It relies on EXIF data to organize and display your photos effectively, which is crucial for the migration process we'll describe later.
-- It can handle the playback of various video formats, including those commonly used in iCloud.
-- The default Nextcloud Photos app sucks.
+### 5. Download to the SERVER, not via your laptop
+Re-uploading ~500 GB from a home connection is painful. Instead, grab each part's download link from `privacy.apple.com` and `curl` it **directly onto the server** in parallel — datacenter bandwidth, and it survives disconnects with `disown`. Apple's links expire in minutes, so move fast. See `download_parts.sh`.
 
-To set up Memories:
+### 6. Favorites = a real "star", not just an album
+The Memories **Favorites view** (`/apps/memories/favorites`) shows files tagged with Nextcloud's favorite flag, **not** an album named "Favorites." Map `Favorites.csv` to the actual star tag (see `reconstruct_albums.sh`).
 
-1. Install the Memories app in your Nextcloud instance if you haven't already.
+### 7. No GPU? HEVC still transcodes fine on a big CPU
+Without `/dev/dri`, transcoding is software-only. On a many-core box it's still fast (we measured 1080p HEVC at ~6x real-time). Just make sure `ffmpeg`/`ffprobe` paths are set for Memories and encryption is off (#1).
 
-2. Follow the installation guide at [https://memories.gallery/install/](https://memories.gallery/install/) for detailed setup instructions.
+---
 
-3. It's highly recommended to set up hardware transcoding. This is especially important for videos from iCloud, as many of them use the HEVC codec, which browsers can't play directly. Hardware transcoding will ensure smooth playback of your videos.
+## What's in here
 
-   - For instructions on setting up hardware transcoding, visit: [https://memories.gallery/hw-transcoding/](https://memories.gallery/hw-transcoding/)
-   - Hardware transcoding can significantly improve performance and reduce CPU usage when viewing videos in Memories.
+It's **one tool** — `icloud2nc.sh` — with subcommands. The Python files are its helpers (auto-copied next to it on first run).
 
-4. After completing the migration process and uploading your media, you may need to trigger a reindex of your photos and videos. This process will ensure that all your media is properly cataloged and that the new transcoding settings are applied.
+| File | Purpose |
+|---|---|
+| **`icloud2nc.sh`** | **The all-in-one tool.** Edit the CONFIG block at the top, then run subcommands (below). |
+| `build_photo_dates.py` | Helper: builds the exiftool `-csv` batch that restores photo dates. |
+| `fix_video_dates.py` | Helper: fast video-date fix (sets file mtime from the metadata CSVs). |
+| `autodate.py` | Helper + cron: gives newly-arrived dateless files a date from their **filename**. |
+| `config.sh`, `download_parts.sh` | Optional standalone variants (the all-in-one already includes these). |
 
-## Downloading iCloud Data
+### Subcommands
+```text
+./icloud2nc.sh doctor     preflight: encryption status, tools, disk, Memories, GPU
+./icloud2nc.sh tools      install exiftool + static ffmpeg/ffprobe (no root) and wire into Nextcloud
+./icloud2nc.sh download    parallel, detach-safe server-side download from parts.txt
+./icloud2nc.sh import      extract -> restore photo EXIF -> fix video dates -> scan -> index
+./icloud2nc.sh albums      Memories albums + matching /Albums folders + Favorites stars + Hidden
+./icloud2nc.sh extras      geocoding (places) + Recognize (AI) + Preview Generator
+./icloud2nc.sh crons       going-forward automation (index 15m, filename-dates 30m)
+./icloud2nc.sh status      counts: library files, memories rows, albums, folders
+./icloud2nc.sh watch       background watchdog that restarts a dead import
+./icloud2nc.sh all         download -> import -> albums -> extras -> crons
+```
 
-To download all your iCloud data:
-1. Disable Advanced Data Protection if enabled, otherwise Apple won't have access to your encrypted data and will send only the metadata they have. Visit [https://support.apple.com/en-us/108756](https://support.apple.com/en-us/108756) for more information 
-2. Go to [privacy.apple.com](https://privacy.apple.com)
-3. Log in with your Apple ID
-4. Request a copy of your data
-5. Wait for Apple to process your request and download the data when available. Apparently this can take up to a week - for me, it took 3-4 days.
+## Order of operations
+```bash
+nano icloud2nc.sh                 # edit the CONFIG block (NC_USER, paths, OCC)
+./icloud2nc.sh doctor             # fix anything it flags (esp. encryption -- gotcha #1)
+./icloud2nc.sh tools              # exiftool + ffmpeg
+# put your part links in ~/icloud_migration/parts.txt  (lines: "6  https://...")
+./icloud2nc.sh download           # downloads to the server, survives disconnects
+./icloud2nc.sh import             # the long one (hours); run `watch` alongside for auto-restart
+./icloud2nc.sh albums
+./icloud2nc.sh extras
+./icloud2nc.sh crons
+./icloud2nc.sh status
+# ...or just: ./icloud2nc.sh all
+```
 
-## Data Migration Process
+`parts.txt` format (one per line):
+```text
+6   https://cvws.icloud-content.com/.....Part+6+of+21.zip?....
+7   https://cvws.icloud-content.com/.....Part+7+of+21.zip?....
+```
 
-Before proceeding with the migration, please note the following about the scripts in this repository:
+## Requirements
+- Shell access to the Nextcloud server and the ability to run `occ`.
+- `unzip`, `python3`, `perl` (for exiftool), and a static `ffmpeg`/`ffprobe` (no root needed -- see `setup_extras.sh`).
+- `exiftool` (clone `https://github.com/exiftool/exiftool` -- pure Perl, no root).
+- The Memories app installed; Nextcloud background jobs set to **cron**.
 
-- You will need to modify hardcoded variables in the scripts to match your specific directory structure and file locations:
-  - For Bash scripts: Look for variables at the beginning of the script.
-  - For Python scripts: Look for variables inside the `if __name__ == "__main__":` block.
+## Going forward (new phone photos)
+1. Install the **Nextcloud mobile app** -> enable **Auto Upload** to your photo folder.
+2. `install_crons.sh` adds: `memories:index` every 15 min (new photos appear) and `autodate.py` every 30 min (filename-based dates for dateless files).
+3. Photos with GPS are reverse-geocoded automatically once `setup_extras.sh` has run `places-setup`.
 
-- By default, most scripts are set to copy files rather than move them directly. This is the safest option as it preserves your original data. However, it's generally fine and more efficient to move files directly:
-  - If you're confident in your setup and have backups, consider changing the scripts to move files instead of copying them.
-  - To do this, look for variables or options in the scripts that control whether files are copied or moved, and adjust them accordingly.
-  - Moving files directly can significantly speed up the migration process, especially for large collections.
-
-- Always ensure you have backups of your data before running any migration scripts, regardless of whether you're copying or moving files.
-
-- Make sure to review and modify the paths before running any scripts. The paths should point to the relevant data for each script (e.g., vCard files for contact scripts, photo directories for photo scripts).
-
-### Calendars
-
-1. In Nextcloud, go to Calendar
-2. Navigate to Settings
-3. Select "Import Calendar"
-4. Choose the calendar files from your iCloud download
-
-### Contacts
-
-1. (Optional) If you encounter issues importing vCards, run the [remove_image_from_vcard.py](./contacts/remove_image_from_vcard.py) script to remove images from the vCards:
-   ```
-   python contacts/remove_image_from_vcard.py
-   ```
-2. Merge the multiple .vcf files from the iCloud download into a single file using the provided script:
-   ```
-   bash contacts/merge_vcfs.sh
-   ```
-   You can find the script here: [merge_vcfs.sh](./contacts/merge_vcfs.sh)
-3. In Nextcloud, go to Contacts
-4. Navigate to Settings
-5. Select "Import"
-6. Upload the merged .vcf file
-
-### Photos
-
-When migrating photos from iCloud to Nextcloud, there are two main challenges:
-
-1. The iCloud download spreads photos across multiple directories, making organization difficult.
-2. The downloaded photos lack EXIF metadata, which is crucial for proper organization in Nextcloud, especially when using the [Memories app](https://apps.nextcloud.com/apps/memories).
-
-The Memories app in Nextcloud is highly recommended for managing your photo collection, as it provides features like timeline view, face recognition, and location-based browsing. However, it relies heavily on EXIF data to function effectively.
-
-To address these challenges and prepare your photos for optimal use with the Memories app, we'll use a series of scripts to consolidate the photos and restore the EXIF metadata. Here's the process:
-
-1. Extracting and moving photos:
-   - Script: [move_images.py](./photos/move_images.py)
-   - Purpose: This script extracts photos from various folders in your iCloud download and moves them all into a single folder: "Photos_All/Photos".
-   - Usage: Run the script, ensuring you've set the correct source path. The script will create the "Photos_All/Photos" directory in the same location as the source.
-
-2. Merging metadata CSV files:
-   - Script: [merge_csv.py](./photos/merge_csv.py)
-   - Purpose: In the iCloud download, you'll find several randomly named CSV files in the "Photos_All" folder. This script merges all these CSV files into a single metadata file.
-   - Usage: Run the script, pointing it to the "Photos_All" directory containing the CSV files.
-
-3. Adding EXIF data to photos:
-   - Script: [add_exif_data.py](./photos/add_exif_data.py)
-   - Purpose: This script takes the photos in the "Photos_All/Photos" folder and the merged CSV metadata file. It then processes the metadata and adds it as EXIF data to each image file.
-   - Usage: Run the script, ensuring you've set the correct paths for the photo directory and the merged metadata CSV file.
-   - Note: This process can take a considerable amount of time, potentially multiple hours for large collections (e.g., around 20,000 files). Please be patient and ensure your computer won't go to sleep during this process.
-
-4. (Optional) Adding EXIF data from filenames:
-   - Script: [add_exif_data_from_filename.py](./photos/add_exif_data_from_filename.py)
-   - Purpose: This script adds metadata to pictures if they have a date in their filename.
-   - Usage: Run the script after setting the appropriate variables for your file structure.
-
-5. Migrating albums:
-   First, locate your album information. In your iCloud download, look for an "Albums" directory within one of the many "iCloud Photos" part directories. This directory contains CSV files with information about your albums.
-
-   There are two methods to migrate your albums:
-
-   a. Using Memories albums directly (Recommended):
-   - Script: [migrate_albums.py](./photos/migrate_albums.py)
-   - Purpose: This script migrates your albums to Memories albums directly.
-   - Usage: 
-     1. First, ensure all your photos are uploaded to Nextcloud and properly indexed (see steps 6 and 7 below).
-     2. Run the script after setting the appropriate variables, pointing to the CSV files in the "Albums" directory you found earlier.
-   - Note: This method is recommended as it avoids duplicating images that appear in multiple albums and works directly with the Memories app.
-
-   b. Creating directories for each album:
-   - Script: [migrate_albums_to_dirs.py](./photos/migrate_albums_to_dirs.py)
-   - Purpose: This script creates directories for each album and copies the photos into them.
-   - Usage: Run the script after setting the appropriate variables, pointing to the CSV files in the "Albums" directory.
-   - Note: This method will duplicate images if they are in multiple albums.
-
-   If you choose method b) and want to delete the original photos after copying:
-   - Script: [delete_copied_album_photos.py](./photos/delete_copied_album_photos.py)
-   - Purpose: This script deletes the original photos after they've been copied to album directories.
-   - Usage: Run this script only after successfully running migrate_albums_to_dirs.py and verifying the copies.
-
-After running these scripts, your photos will be organized with all relevant metadata embedded as EXIF data. This will allow the Nextcloud Memories app to properly organize and display your photos. You can then proceed to upload these processed photos to Nextcloud:
-
-6. Upload photos to Nextcloud
-   - If Nextcloud is on the same machine, consider copying the processed files directly into Nextcloud's data directory for large collections.
-   - Note: If you copy files directly, permissions will need to be fixed. After copying, run the following command, replacing `/path/to/nextcloud/data/user/files/Photos/Photos` with the actual path to your photos in the Nextcloud data directory:
-
-     ```bash
-     NCDATA=/path/to/nextcloud/data/user/files/Photos/Photos && \
-     sudo find "$NCDATA" -type d -exec chmod 750 {} \; && \
-     sudo find "$NCDATA" -type f -exec chmod 640 {} \; && \
-     sudo chown -R www-data:www-data "$NCDATA"
-     ```
-
-     This command sets the correct permissions (750 for directories, 640 for files) and changes the owner to www-data (adjust if your web server runs as a different user).
-
-   - Otherwise, use the Nextcloud web interface or desktop client to upload the photos.
-
-7. After uploading, run the following commands to ensure Nextcloud recognizes all the new files and indexes them properly:
-
-   For Nextcloud AIO (All-In-One) Docker setups, use this command structure:
-   ```
-   sudo docker exec --user www-data -it nextcloud-aio-nextcloud php occ [command]
-   ```
-
-   Run these specific commands:
-   ```
-   sudo docker exec --user www-data -it nextcloud-aio-nextcloud php occ files:scan --all
-   sudo docker exec --user www-data -it nextcloud-aio-nextcloud php occ memories:index
-   ```
-
-   If you're not using Nextcloud AIO, adjust the commands according to your specific Nextcloud installation.
-
-8. If you chose method a) for album migration (Using Memories albums directly), now is the time to run the [migrate_albums.py](./photos/migrate_albums.py) script.
-
-Note: Make sure to review and modify the paths in each script before running them. The scripts are designed to create new data without overwriting original files, but always ensure you have backups before proceeding.
-
-## Connecting Devices to Nextcloud
-### Linux
-1. Use the "Online Accounts" application to add your Nextcloud account.
-
-Once set up, Nextcloud will automatically integrate with various GNOME applications. For example:
-- Calendar app for calendar sync
-- Evolution for calendars and contacts
-
-Note: Available integrations may vary depending on your Linux distribution and desktop environment.
-
-### Android
-Note: It's recommended to use F-Droid to download and install all the following apps, as it provides open-source versions.
-
-1. Install the Nextcloud app.
-2. Set up auto-upload in settings for various photo libraries (e.g., Gallery, Screenshots)
-3. For calendar and contacts sync:
-   - Install DAVx5
-   - Set up DAVx5 (possibly through Nextcloud app settings, or manually)
-4. For WebCal calendars, install ICSx5
-5. For notes, install the Nextcloud Notes app
-6. For photos, install the Memories app
+## Notes & limits
+- **Location can't be invented.** A photo with no embedded GPS has no source for a location. Only GPS-bearing photos get mapped.
+- **Album folders use hardlinks** (`ln`), so duplicating a photo across albums costs ~no extra disk. A `.nomedia` in `/Albums` keeps those copies out of the Memories timeline (no doubles).
+- Run heavy steps **without** concurrent downloads -- extraction + indexing are disk-bound and will fight a download for I/O.
