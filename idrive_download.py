@@ -6,61 +6,13 @@ own session cookie. Re-run any time -- files already present at the same size ar
 skipped. Used by icloud2nc 'drive-pull'.
 """
 import argparse, os, sys, getpass, shutil, threading, concurrent.futures
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from iauth import get_service  # shared auth (2FA + SMS fallback)
 
 _plock = threading.Lock()
 def say(msg):
     with _plock: print(msg, flush=True)
-
-def get_service(apple_id):
-    try:
-        from icloudpy import ICloudPyService as Svc
-    except Exception:
-        from pyicloud import PyiCloudService as Svc
-    pw = os.environ.get("APPLE_PW") or getpass.getpass("iCloud password for %s: " % apple_id)
-    cdir = os.environ.get("ICLOUD2NC_COOKIE_DIR") or os.path.expanduser("~/.icloud2nc-cookies")
-    try: os.makedirs(cdir, exist_ok=True)
-    except Exception: pass
-    try:
-        api = Svc(apple_id, pw, cookie_directory=cdir)
-    except TypeError:
-        api = Svc(apple_id, pw)
-    if getattr(api, "requires_2fa", False):
-        try:
-            if hasattr(api, "trigger_2fa_push_notification"):
-                api.trigger_2fa_push_notification()
-                print(">> A 6-digit code was just sent to your trusted Apple devices (iPhone/iPad/Mac).")
-            else:
-                print(">> Check your trusted Apple devices for a 6-digit code.")
-        except Exception as e:
-            print(">> Could not trigger the push (%s). Check your devices for a code anyway." % e)
-        code = input("Enter the 2FA code: ").strip()
-        if not api.validate_2fa_code(code):
-            print("ERROR: that 2FA code was not accepted."); sys.exit(2)
-        try:
-            if api.trust_session():
-                print(">> Session trusted -- 2FA will not be needed again for ~30 days.")
-            else:
-                print(">> Note: could not fully trust the session; 2FA may be asked again.")
-        except Exception as e:
-            print(">> trust_session note: %s" % e)
-    elif getattr(api, "requires_2sa", False):
-        devs = api.trusted_devices
-        if not devs:
-            print("ERROR: needs verification but no trusted devices/phones available."); sys.exit(2)
-        print("Where should Apple send the verification code?")
-        for i, d in enumerate(devs):
-            print("  %d: %s" % (i, d.get("deviceName") or ("SMS to " + d.get("phoneNumber", "?")) or str(d)))
-        sel = input("Choose [0]: ").strip() or "0"
-        try: dev = devs[int(sel)]
-        except Exception: dev = devs[0]
-        if not api.send_verification_code(dev):
-            print("ERROR: could not send a verification code."); sys.exit(2)
-        code = input("Enter the verification code: ").strip()
-        if not api.validate_verification_code(dev, code):
-            print("ERROR: that code was not accepted."); sys.exit(2)
-    else:
-        print(">> Session already trusted; no 2FA needed.")
-    return api
 
 def fetch(item, out):
     resp = item.open(stream=True)

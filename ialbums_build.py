@@ -5,43 +5,15 @@ icloud2nc's 'albums' step can rebuild Memories albums + folder views + favorites
 WITHOUT a download. Interactive Apple auth (password + 2FA); nothing stored.
 """
 import argparse, os, sys, getpass
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from iauth import get_service  # shared auth (2FA + SMS fallback)
 
 # Smart/system albums we don't want to recreate as albums (All Photos == timeline).
 SKIP = {"all photos", "all videos", "time-lapse", "videos", "slo-mo", "bursts", "live",
         "panoramas", "screenshots", "selfies", "live photos", "portrait",
         "long exposure", "animated", "recently added",
         "recently deleted", "imports", "shared", "my photo stream"}
-
-def get_service(apple_id):
-    from icloudpy import ICloudPyService as Svc
-    pw = os.environ.get("APPLE_PW") or getpass.getpass("iCloud password for %s: " % apple_id)
-    cdir = os.environ.get("ICLOUD2NC_COOKIE_DIR") or os.path.expanduser("~/.icloud2nc-cookies")
-    try: os.makedirs(cdir, exist_ok=True)
-    except Exception: pass
-    try:
-        api = Svc(apple_id, pw, cookie_directory=cdir)
-    except TypeError:
-        api = Svc(apple_id, pw)
-    if getattr(api, "requires_2fa", False):
-        try:
-            if hasattr(api, "trigger_2fa_push_notification"):
-                api.trigger_2fa_push_notification(); print(">> A 6-digit code was sent to your trusted Apple devices.")
-        except Exception as e:
-            print(">> (could not trigger push: %s)" % e)
-        code = input("Enter the 2FA code: ").strip()
-        if not api.validate_2fa_code(code): print("ERROR: bad 2FA code"); sys.exit(2)
-        try:
-            if api.trust_session():
-                print(">> Session trusted -- 2FA will not be needed again for ~30 days.")
-            else:
-                print(">> Note: could not fully trust the session; 2FA may be asked again.")
-        except Exception as e:
-            print(">> trust_session note: %s" % e)
-    elif getattr(api, "requires_2sa", False):
-        d = api.trusted_devices[0]; api.send_verification_code(d)
-        code = input("Verification code: ").strip()
-        if not api.validate_verification_code(d, code): print("ERROR: bad code"); sys.exit(2)
-    return api
 
 def main():
     ap = argparse.ArgumentParser()

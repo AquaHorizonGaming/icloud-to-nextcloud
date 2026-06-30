@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.15  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.16  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -13,7 +13,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.15"
+VERSION="2.16"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -101,7 +101,7 @@ gb(){ awk "BEGIN{printf \"%.1f\", $1/1073741824}"; }
 free_gb(){ df -PB1 "$1" 2>/dev/null | awk 'NR==2{printf "%.0f",$4/1073741824}'; }
 count_zip(){ ls "$WORK"/incoming/*.zip 2>/dev/null | wc -l; }
 lib_files(){ find "$ICLOUD_DIR" -type f 2>/dev/null | wc -l; }
-sync_helpers(){ local d; d=$(dirname "$SELF"); for h in build_photo_dates.py fix_video_dates.py autodate.py idrive_download.py ialbums_build.py; do
+sync_helpers(){ local d; d=$(dirname "$SELF"); for h in build_photo_dates.py fix_video_dates.py autodate.py idrive_download.py ialbums_build.py iauth.py; do
   [ -f "$d/$h" ] && cp -f "$d/$h" "$LIBDIR/$h"; done; }
 
 doctor(){ local fail=0
