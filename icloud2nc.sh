@@ -1,19 +1,20 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.17  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.18  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
 #  autopull = schedule icloudpd to auto-fetch NEW photos into the right account
 #  drive-pull = live-download iCloud DRIVE files (icloudpy) into /Files/iCloud
 #  pull-albums = rebuild albums on the LIVE path (icloudpy) -- no export needed
+#  contacts-pull / calendars-pull = live-export iCloud Contacts/Calendar (icloudpy)
 #  Two ways to GET photos: (1) privacy.apple.com export -> download, or
 #  (2) pull = direct download via icloudpd (interactive Apple login).
 #  Photos land in /Photos (Memories); iCloud Drive docs land in /Files/iCloud.
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.17"
+VERSION="2.18"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -101,7 +102,7 @@ gb(){ awk "BEGIN{printf \"%.1f\", $1/1073741824}"; }
 free_gb(){ df -PB1 "$1" 2>/dev/null | awk 'NR==2{printf "%.0f",$4/1073741824}'; }
 count_zip(){ ls "$WORK"/incoming/*.zip 2>/dev/null | wc -l; }
 lib_files(){ find "$ICLOUD_DIR" -type f 2>/dev/null | wc -l; }
-sync_helpers(){ local d; d=$(dirname "$SELF"); for h in build_photo_dates.py fix_video_dates.py autodate.py idrive_download.py ialbums_build.py iauth.py; do
+sync_helpers(){ local d; d=$(dirname "$SELF"); for h in build_photo_dates.py fix_video_dates.py autodate.py idrive_download.py ialbums_build.py iauth.py iextract.py; do
   [ -f "$d/$h" ] && cp -f "$d/$h" "$LIBDIR/$h"; done; }
 
 doctor(){ local fail=0
@@ -394,7 +395,7 @@ menu(){ while true; do
  16) hwaccel  17) contacts 18) calendars 19) prune  20) clean
  21) drive (Drive export zip)   22) pull (icloudpd photos)   23) accounts
  24) autopull (auto new photos) 25) drive-pull (live iCloud Drive)  26) pull-albums (rebuild albums)
-  q) quit
+ 27) contacts-pull (live Contacts)   28) calendars-pull (live Calendar)        q) quit
 M
   read -r -p "choose: " ch; case "$ch" in
     1) doctor;; 2) acquire_lock; tools; release_lock;; 3) links;; 4) acquire_lock; download; release_lock;;
@@ -407,6 +408,7 @@ M
     24) autopull status; read -r -p "autopull [o]n / o[f]f / [Enter]=back: " x; case "$x" in o|O) autopull on;; f|F) autopull off;; esac;;
     25) acquire_lock; drive_pull; release_lock;;
     26) acquire_lock; pull_albums; release_lock;;
+    27) acquire_lock; contacts_pull; release_lock;; 28) acquire_lock; calendars_pull; release_lock;;
     q|Q) break;; *) warn "?";; esac
   done; }
 
@@ -651,6 +653,28 @@ pull_albums(){
   fi
 }
 
+_iextract(){ _idrive_install; sync_helpers
+  [ -f "$LIBDIR/iextract.py" ] || die "iextract.py not found next to the tool ($LIBDIR)"
+  local kind="$1" out="$2" id="$3"
+  [ -n "$id" ] || id="$APPLE_ID"
+  [ -n "$id" ] || read -r -p "Apple ID (email): " id
+  [ -n "$id" ] || die "no Apple ID given (set APPLE_ID, or pass one)"
+  banner "iCloud $kind export for $NC_USER (via icloudpy) -> $out"
+  warn "icloudpy will prompt for your Apple password + 2FA in THIS terminal."
+  warn "This tool does not store or read your credentials; auth is between you and Apple."
+  ICLOUD2NC_COOKIE_DIR="$ICLOUDPY_COOKIES" "$ICLOUDPD_VENV/bin/python" "$LIBDIR/iextract.py" --apple-id "$id" --kind "$kind" --out "$out" || { warn "$kind export failed/cancelled -- safe to re-run"; return 0; }
+  # drop a copy into the user's Files area so it's downloadable from the web UI
+  mkdir -p "$FILES_DIR/iCloud-export" 2>/dev/null
+  cp -f "$out" "$FILES_DIR/iCloud-export/" 2>/dev/null
+  occ files:scan --path="${NC_USER}/files/${REL_FILES}" >/dev/null 2>&1
+  ok "$kind exported -> $out  (also in Files: ${REL_FILES}/iCloud-export/$(basename "$out"))"; }
+
+contacts_pull(){ _iextract contacts "$WORK/icloud-contacts.vcf" "${1:-}"
+  echo "  Import: Nextcloud -> Contacts app -> Settings (bottom-left) -> Import -> upload the .vcf"; }
+
+calendars_pull(){ _iextract calendar "$WORK/icloud-calendar.ics" "${1:-}"
+  echo "  Import: Nextcloud -> Calendar app -> Settings -> Import -> upload the .ics"; }
+
 prune(){ confirm "Delete the downloaded part zips in $WORK/incoming to reclaim space?" || { warn "cancelled"; return 0; }
   local b; b=$(du -sh "$WORK/incoming" 2>/dev/null | cut -f1); maybe rm -f "$WORK"/incoming/*.zip; ok "removed downloaded zips (freed ~${b:-0})"; }
 
@@ -673,6 +697,8 @@ case "${1:-menu}" in
   drive) shift; acquire_lock; drive "${1:-}"; release_lock;;
   drive-pull|dpull) shift; acquire_lock; drive_pull "${1:-}"; release_lock;;
   pull-albums|palbums) shift; acquire_lock; pull_albums "${1:-}"; release_lock;;
+  contacts-pull|cpull) shift; acquire_lock; contacts_pull "${1:-}"; release_lock;;
+  calendars-pull|calpull) shift; acquire_lock; calendars_pull "${1:-}"; release_lock;;
   accounts|account) shift; accounts "$@";;
   prune) acquire_lock; prune; release_lock;; clean) clean;;
   resume) resume;; all) all;; menu) menu;; help|-h|--help) usage;; *) err "unknown: $1"; usage;;
