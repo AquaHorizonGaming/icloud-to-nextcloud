@@ -107,6 +107,8 @@ APPLE_ID=you@example.com ./icloud2nc.sh pull
 
 Auth is interactive (password + 2FA). Nothing is stored beyond icloudpd's session cookie. Files land already-dated in `Photos/Icloud`, then `files:scan` + `memories:index` run automatically.
 
+**Albums on the live path:** icloudpd downloads a flat library with *no album info*. To get albums without the export, run `pull-albums` after `pull` — it asks iCloud (via icloudpy) which photos are in each album, writes the same membership CSVs the export uses, then reuses the `albums` step to create Memories albums + hardlinked folder views + favorite stars (no extra disk). Album/favorite membership otherwise lives only in the privacy.apple.com export.
+
 ---
 
 ## 6. Getting your iCloud Drive files in
@@ -185,6 +187,7 @@ Nextcloud mobile app → **Auto Upload** into your photo folder. `crons` then ru
 | `autopull` | Schedule incremental icloudpd pulls per account (`on`/`off`/`status`) |
 | `drive` | Import an iCloud Drive export zip into `Files/iCloud` |
 | `drive-pull` | Live, parallel iCloud Drive download via icloudpy |
+| `pull-albums` | Rebuild albums on the live (`pull`) path via icloudpy — no export needed |
 | `accounts` | List all NC users / pick the target (`list`/`add`/`use`/`current`/`remove`) |
 | `status` | Quick counts (files, indexed items, albums, folders, favorites, free space) |
 | `verify` | Deep integrity check |

@@ -84,6 +84,7 @@ Many videos export with a junk `0000:00:00` date, so Memories dumps them at "tod
 | `calendars`| Collect exported `.ics` files for import |
 | `drive`    | Import an **iCloud Drive export zip** into `/Files/iCloud` (Files app only, not in Memories) |
 | `drive-pull`| **Live-download iCloud Drive** files via icloudpy (interactive Apple login, no export needed) |
+| `pull-albums`| Rebuild **albums** on the live `pull` path via icloudpy (Memories albums + folders + favorites, no export) |
 | `prune`    | Delete the downloaded part zips to reclaim space |
 | `clean`    | Clear scratch (metadata/state/logs) — library untouched |
 | `accounts` | Manage **multiple Nextcloud accounts** and pick which one all photos/files target |

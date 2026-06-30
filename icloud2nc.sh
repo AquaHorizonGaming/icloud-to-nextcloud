@@ -1,18 +1,19 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.12  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.13  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
 #  autopull = schedule icloudpd to auto-fetch NEW photos into the right account
 #  drive-pull = live-download iCloud DRIVE files (icloudpy) into /Files/iCloud
+#  pull-albums = rebuild albums on the LIVE path (icloudpy) -- no export needed
 #  Two ways to GET photos: (1) privacy.apple.com export -> download, or
 #  (2) pull = direct download via icloudpd (interactive Apple login).
 #  Photos land in /Photos (Memories); iCloud Drive docs land in /Files/iCloud.
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.12"
+VERSION="2.13"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -99,7 +100,7 @@ gb(){ awk "BEGIN{printf \"%.1f\", $1/1073741824}"; }
 free_gb(){ df -PB1 "$1" 2>/dev/null | awk 'NR==2{printf "%.0f",$4/1073741824}'; }
 count_zip(){ ls "$WORK"/incoming/*.zip 2>/dev/null | wc -l; }
 lib_files(){ find "$ICLOUD_DIR" -type f 2>/dev/null | wc -l; }
-sync_helpers(){ local d; d=$(dirname "$SELF"); for h in build_photo_dates.py fix_video_dates.py autodate.py idrive_download.py; do
+sync_helpers(){ local d; d=$(dirname "$SELF"); for h in build_photo_dates.py fix_video_dates.py autodate.py idrive_download.py ialbums_build.py; do
   [ -f "$d/$h" ] && cp -f "$d/$h" "$LIBDIR/$h"; done; }
 
 doctor(){ local fail=0
@@ -390,7 +391,8 @@ menu(){ while true; do
  11) report   12) all     13) backup   14) dedupe   15) faces
  16) hwaccel  17) contacts 18) calendars 19) prune  20) clean
  21) drive (Drive export zip)   22) pull (icloudpd photos)   23) accounts
- 24) autopull (auto new photos) 25) drive-pull (live iCloud Drive files)   q) quit
+ 24) autopull (auto new photos) 25) drive-pull (live iCloud Drive)  26) pull-albums (rebuild albums)
+  q) quit
 M
   read -r -p "choose: " ch; case "$ch" in
     1) doctor;; 2) acquire_lock; tools; release_lock;; 3) links;; 4) acquire_lock; download; release_lock;;
@@ -402,6 +404,7 @@ M
     23) _accounts_interactive;;
     24) autopull status; read -r -p "autopull [o]n / o[f]f / [Enter]=back: " x; case "$x" in o|O) autopull on;; f|F) autopull off;; esac;;
     25) acquire_lock; drive_pull; release_lock;;
+    26) acquire_lock; pull_albums; release_lock;;
     q|Q) break;; *) warn "?";; esac
   done; }
 
@@ -620,6 +623,26 @@ drive_pull(){
   log "files:scan"; occ files:scan --path="${NC_USER}/files/${REL_FILES}" | nostderr | tail -4 | tee -a "$LOG"
   ok "iCloud Drive synced -> $DRIVE_DIR (Files app only, not in Memories)"; }
 
+# Build albums on the LIVE (pull) path: ask iCloud which photos are in each album
+# (icloudpy), write the same CSVs the export uses, then reuse 'albums' to create
+# Memories albums + hardlinked folder views + favorite stars (no extra disk).
+pull_albums(){
+  _idrive_install; sync_helpers
+  [ -f "$LIBDIR/ialbums_build.py" ] || die "ialbums_build.py not found next to the tool ($LIBDIR)"
+  local id="${1:-$APPLE_ID}"
+  [ -n "$id" ] || read -r -p "Apple ID (email): " id
+  [ -n "$id" ] || die "no Apple ID given (set APPLE_ID, or run: pull-albums you@example.com)"
+  if [ ! -d "$ICLOUD_DIR" ] || [ "$(lib_files)" -eq 0 ]; then
+    warn "library at $ICLOUD_DIR looks empty -- run 'pull' first so album members exist on disk"
+  fi
+  banner "Live album rebuild for $NC_USER (via icloudpy)"
+  warn "icloudpy will prompt for your Apple password + 2FA in THIS terminal."
+  warn "This tool does not store or read your credentials; auth is between you and Apple."
+  mkdir -p "$WORK/metadata/Albums"
+  "$ICLOUDPD_VENV/bin/python" "$LIBDIR/ialbums_build.py" --apple-id "$id" --out "$WORK/metadata/Albums" || { warn "album fetch failed/cancelled -- safe to re-run"; return 0; }
+  albums
+}
+
 prune(){ confirm "Delete the downloaded part zips in $WORK/incoming to reclaim space?" || { warn "cancelled"; return 0; }
   local b; b=$(du -sh "$WORK/incoming" 2>/dev/null | cut -f1); maybe rm -f "$WORK"/incoming/*.zip; ok "removed downloaded zips (freed ~${b:-0})"; }
 
@@ -641,6 +664,7 @@ case "${1:-menu}" in
   faces) faces;; hwaccel) hwaccel;; contacts) shift; contacts "${1:-}";; calendars) calendars;;
   drive) shift; acquire_lock; drive "${1:-}"; release_lock;;
   drive-pull|dpull) shift; acquire_lock; drive_pull "${1:-}"; release_lock;;
+  pull-albums|palbums) shift; acquire_lock; pull_albums "${1:-}"; release_lock;;
   accounts|account) shift; accounts "$@";;
   prune) acquire_lock; prune; release_lock;; clean) clean;;
   resume) resume;; all) all;; menu) menu;; help|-h|--help) usage;; *) err "unknown: $1"; usage;;
