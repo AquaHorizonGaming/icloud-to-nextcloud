@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.7  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.8  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -12,7 +12,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.7"
+VERSION="2.8"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -551,14 +551,21 @@ _accounts_remove(){ local name="$1"; [ -n "$name" ] || { warn "which profile?"; 
   [ "$(cat "$CURRENT_FILE" 2>/dev/null)" = "$name" ] && rm -f "$CURRENT_FILE"
   ok "removed profile '$name'"; }
 
-_account_prep(){ local u="${1:-$NC_USER}" dd nf
+_account_prep(){ local u="${1:-$NC_USER}" dd nf d; local made=()
   dd=$(_dbget datadirectory); dd="${dd:-/storage}"; nf="$dd/$u/files"
   banner "Preparing folders + Memories for '$u'"
-  mkdir -p "$nf/Photos/Icloud" "$nf/Photos/Albums" "$nf/Files/iCloud" 2>/dev/null
-  touch "$nf/Photos/Albums/.nomedia" 2>/dev/null
-  occ files:scan --path="$u/files" >/dev/null 2>&1 || warn "scan skipped (new user may need a first web login to create its home)"
+  for d in "Photos/Icloud" "Photos/Albums" "Files/iCloud"; do
+    [ -d "$nf/$d" ] || { mkdir -p "$nf/$d" 2>/dev/null && made+=("$d"); }
+  done
+  [ -e "$nf/Photos/Albums/.nomedia" ] || touch "$nf/Photos/Albums/.nomedia" 2>/dev/null
+  if [ "${#made[@]}" -gt 0 ]; then
+    for d in "${made[@]}"; do occ files:scan --path="$u/files/$d" >/dev/null 2>&1; done
+    ok "created folder(s) for '$u': ${made[*]} (scanned only the new ones)"
+  else
+    ok "folders already exist for '$u' -- no rescan needed"
+  fi
   occ user:setting "$u" memories timelinePath "/Photos/Icloud" >/dev/null 2>&1
-  ok "ready: '$u' -> Photos/Icloud (Memories timeline), Files/iCloud (documents)"; }
+  echo "  Memories timeline -> /Photos/Icloud"; }
 
 _accounts_interactive(){ _accounts_list
   read -r -p "action: [a]dd  [u]se  [r]emove  [Enter]=back: " x
