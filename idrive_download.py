@@ -3,7 +3,7 @@
 
 Auth is interactive (Apple password + 2FA). Nothing is stored by this script
 beyond icloudpy's own session cookie. Re-run any time -- files already present
-at the same size are skipped, so repeats are cheap. Used by icloud2nc 'drive-pull'.
+at the same size are skipped. Used by icloud2nc 'drive-pull'.
 """
 import argparse, os, sys, getpass, shutil
 
@@ -14,18 +14,43 @@ def get_service(apple_id):
         from pyicloud import PyiCloudService as Svc
     pw = os.environ.get("APPLE_PW") or getpass.getpass("iCloud password for %s: " % apple_id)
     api = Svc(apple_id, pw)
+
+    # Modern two-factor (2FA): Apple pushes a 6-digit code to trusted devices.
     if getattr(api, "requires_2fa", False):
-        code = input("Two-factor code (from an Apple device): ").strip()
-        api.validate_2fa_code(code)
+        try:
+            if hasattr(api, "trigger_2fa_push_notification"):
+                api.trigger_2fa_push_notification()
+                print(">> A 6-digit code was just sent to your trusted Apple devices (iPhone/iPad/Mac).")
+            else:
+                print(">> Check your trusted Apple devices for a 6-digit code.")
+        except Exception as e:
+            print(">> Could not trigger the push (%s). Check your devices for a code anyway." % e)
+        code = input("Enter the 2FA code: ").strip()
+        if not api.validate_2fa_code(code):
+            print("ERROR: that 2FA code was not accepted."); sys.exit(2)
         if not getattr(api, "is_trusted_session", True):
             try: api.trust_session()
             except Exception: pass
+
+    # Older two-step (2SA): pick a device (incl. SMS phone numbers) to send a code.
     elif getattr(api, "requires_2sa", False):
-        dev = api.trusted_devices[0]
-        api.send_verification_code(dev)
-        code = input("Verification code: ").strip()
+        devs = api.trusted_devices
+        if not devs:
+            print("ERROR: account needs verification but no trusted devices/phones are available."); sys.exit(2)
+        print("Where should Apple send the verification code?")
+        for i, d in enumerate(devs):
+            label = d.get("deviceName") or ("SMS to " + d.get("phoneNumber", "?")) or str(d)
+            print("  %d: %s" % (i, label))
+        sel = input("Choose [0]: ").strip() or "0"
+        try: dev = devs[int(sel)]
+        except Exception: dev = devs[0]
+        if not api.send_verification_code(dev):
+            print("ERROR: could not send a verification code."); sys.exit(2)
+        code = input("Enter the verification code: ").strip()
         if not api.validate_verification_code(dev, code):
-            print("verification failed"); sys.exit(2)
+            print("ERROR: that code was not accepted."); sys.exit(2)
+    else:
+        print(">> Session already trusted; no 2FA needed.")
     return api
 
 def fetch(item, out):
@@ -82,6 +107,7 @@ def main():
     except Exception as e:
         print("ERROR: no accessible iCloud Drive for this account: %s" % e); sys.exit(3)
     st = {"got": 0, "skip": 0, "bytes": 0}
+    print("Downloading iCloud Drive -> %s" % a.dest)
     walk(drive, a.dest, "", st)
     print("DONE downloaded=%d skipped=%d bytes=%d" % (st["got"], st["skip"], st["bytes"]))
 
