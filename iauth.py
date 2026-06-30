@@ -13,13 +13,25 @@ def _svc(apple_id, pw):
         from icloudpy import ICloudPyService as Svc
     except Exception:
         from pyicloud import PyiCloudService as Svc
-    cdir = os.environ.get("ICLOUD2NC_COOKIE_DIR") or os.path.expanduser("~/.icloud2nc-cookies")
+    base = os.environ.get("ICLOUD2NC_COOKIE_DIR") or os.path.expanduser("~/.icloud2nc-cookies")
+    # per-account cookie dir so accounts never share/contaminate sessions
+    safe = "".join(ch if (ch.isalnum() or ch in "@.-_") else "_" for ch in apple_id) or "default"
+    cdir = os.path.join(base, safe)
     try: os.makedirs(cdir, exist_ok=True)
     except Exception: pass
+    def _mk():
+        try: return Svc(apple_id, pw, cookie_directory=cdir)
+        except TypeError: return Svc(apple_id, pw)
     try:
-        return Svc(apple_id, pw, cookie_directory=cdir), cdir
-    except TypeError:
-        return Svc(apple_id, pw), cdir
+        return _mk(), cdir
+    except Exception:
+        # stale/partial/cross-account token -> wipe this account's cookies, retry fresh once
+        try:
+            for fn in os.listdir(cdir):
+                try: os.remove(os.path.join(cdir, fn))
+                except Exception: pass
+        except Exception: pass
+        return _mk(), cdir
 
 
 def _auth_headers(api):
