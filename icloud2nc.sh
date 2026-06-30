@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.9  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.10  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -12,7 +12,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.9"
+VERSION="2.10"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -530,20 +530,34 @@ _accounts_add(){ local name="$1" email="${2:-}"; [ -n "$name" ] || read -r -p "P
   _account_prep "$uid"
   echo "$name" > "$CURRENT_FILE"; ok "active account -> $name (all photos/files now target '$uid')"; }
 
+# Reload the active account's settings into THIS running shell (so switching
+# accounts inside the interactive menu takes effect immediately).
+_load_account(){ local name="$1"
+  NC_USER=""; NC_FILES=""; ICLOUD_DIR=""; ALBUMS_DIR=""; FILES_DIR=""; DRIVE_DIR=""; APPLE_ID=""
+  [ -f "$ACCT_DIR/$name.conf" ] && . "$ACCT_DIR/$name.conf"
+  ACTIVE_ACCT="$name"
+  NC_USER="${NC_USER:-$name}"
+  NC_FILES="${NC_FILES:-/storage/${NC_USER}/files}"
+  ICLOUD_DIR="${ICLOUD_DIR:-${NC_FILES}/Photos/Icloud}"
+  ALBUMS_DIR="${ALBUMS_DIR:-${NC_FILES}/Photos/Albums}"
+  FILES_DIR="${FILES_DIR:-${NC_FILES}/Files}"
+  DRIVE_DIR="${DRIVE_DIR:-${FILES_DIR}/iCloud}"
+  REL_ICLOUD="${ICLOUD_DIR#${NC_FILES}/}"; REL_FILES="${FILES_DIR#${NC_FILES}/}"; }
+
 _accounts_use(){ local name="$1"
   [ -n "$name" ] || { _accounts_list; read -r -p "use which account (username)? " name; }
   [ -n "$name" ] || { warn "no account given"; return 1; }
-  if [ -f "$ACCT_DIR/$name.conf" ]; then
-    echo "$name" > "$CURRENT_FILE"; local u; u=$(. "$ACCT_DIR/$name.conf"; echo "$NC_USER")
-    ok "active account -> $name (NC user '$u'). All commands now target it."; return 0
+  if [ ! -f "$ACCT_DIR/$name.conf" ]; then
+    if occ user:info "$name" >/dev/null 2>&1; then
+      { echo "# icloud2nc account profile (auto)"; echo "NC_USER=\"$name\""; } > "$ACCT_DIR/$name.conf"
+    else
+      warn "no profile and no Nextcloud user called '$name'. Available users:"; _nc_users | sed 's/^/    /'; return 1
+    fi
   fi
-  if occ user:info "$name" >/dev/null 2>&1; then
-    { echo "# icloud2nc account profile (auto)"; echo "NC_USER=\"$name\""; } > "$ACCT_DIR/$name.conf"
-    echo "$name" > "$CURRENT_FILE"
-    ok "active account -> $name (existing Nextcloud user; profile created). All commands now target it."
-    echo "  Tip: 'accounts add $name you@icloud.com' to also store an Apple ID for pull/autopull."; return 0
-  fi
-  warn "no profile and no Nextcloud user called '$name'. Available users:"; _nc_users | sed 's/^/    /'; return 1; }
+  echo "$name" > "$CURRENT_FILE"
+  _load_account "$name"
+  ok "active account -> $name (NC user '$NC_USER'). All commands now target it."
+  [ -n "$APPLE_ID" ] && echo "  Apple ID for pull/drive-pull: $APPLE_ID" || echo "  (no Apple ID stored -- 'accounts add $name you@icloud.com' to add one)"; }
 
 _accounts_remove(){ local name="$1"; [ -n "$name" ] || { warn "which profile?"; return 1; }
   [ -f "$ACCT_DIR/$name.conf" ] || { warn "no such profile: $name"; return 1; }
