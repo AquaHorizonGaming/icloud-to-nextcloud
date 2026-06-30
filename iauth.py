@@ -43,18 +43,36 @@ def _auth_headers(api):
 
 
 def _list_phones(api):
-    """Best-effort: return [(id, label)] of trusted phone numbers, if Apple exposes them."""
+    """Return [(id, label)] of trusted phone numbers Apple has on file for this login."""
+    data = {}
     try:
         r = api.session.get(api.auth_endpoint, headers=_auth_headers(api))
-        data = r.json() if hasattr(r, "json") else {}
-    except Exception:
-        return []
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+    except Exception as e:
+        print(">> (couldn't fetch phone list: %s)" % e)
+    # phone numbers may sit at top level or under a few nested keys depending on auth state
+    nums = (data.get("trustedPhoneNumbers")
+            or (data.get("direct") or {}).get("trustedPhoneNumbers")
+            or (data.get("phoneNumberVerification") or {}).get("trustedPhoneNumbers")
+            or [])
     out = []
-    for p in (data.get("trustedPhoneNumbers") or []):
+    for p in nums:
         pid = p.get("id")
-        label = p.get("numberWithDialCode") or p.get("numberWithDialCodeAndPushMode") or p.get("number") or ("#%s" % pid)
+        last = p.get("lastTwoDigits") or p.get("lastFourDigits")
+        label = (p.get("numberWithDialCode")
+                 or p.get("obfuscatedNumber")
+                 or (("number ending in " + last) if last else None)
+                 or p.get("numberWithDialCodeAndPushMode")
+                 or p.get("number")
+                 or ("phone #%s" % pid))
         if pid is not None:
             out.append((pid, label))
+    if not out:
+        print(">> (Apple returned no phone list here; top-level keys: %s)"
+              % ", ".join(list(data.keys())[:10]) if data else "(empty/non-JSON response)")
     return out
 
 
