@@ -22,6 +22,12 @@ It does what the basic guides skip: handles server-side **encryption**, repairs 
 
 > **New in v2.4:** `drive` (iCloud Drive import), `pull` (icloudpd direct download), and `accounts` (multi-account targeting).
 
+> **Also:** `drive-pull` (live, parallel iCloud Drive download), `autopull` (auto-fetch new photos), and multi-account support that lists every Nextcloud user.
+
+## 📖 Documentation
+
+Full manual: **[DOCS.md](DOCS.md)** — install, every command, config variables, automation, how the date/encryption/album handling works, troubleshooting, security, and FAQ. Also browsable on the **[Wiki tab](../../wiki)**.
+
 ---
 
 ## ⚠️ Read first — the gotchas that waste hours
