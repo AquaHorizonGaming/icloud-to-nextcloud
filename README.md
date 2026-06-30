@@ -80,6 +80,7 @@ Many videos export with a junk `0000:00:00` date, so Memories dumps them at "tod
 | `prune`    | Delete the downloaded part zips to reclaim space |
 | `clean`    | Clear scratch (metadata/state/logs) — library untouched |
 | `accounts` | Manage **multiple Nextcloud accounts** and pick which one all photos/files target |
+| `autopull`  | Schedule icloudpd to **auto-fetch new photos** into each account (reuses your `pull` session) |
 
 Run with **no argument** for an interactive menu. Every stage is **resumable** (state under `~/icloud_migration/state/`), fully **logged** (`~/icloud_migration/logs/`), and guarded by a **run-lock** so two heavy runs can't collide.
 
@@ -161,9 +162,22 @@ APPLE_ID=you@example.com ./icloud2nc.sh pull
 
 ## Going forward (new phone photos)
 
-1. Nextcloud mobile app → **Auto Upload** to your photo folder.
-2. `crons` installs `memories:index` every 15 min (new photos appear) and `autodate.py` every 30 min (filename-based dates for dateless files like screenshots).
-3. Photos with GPS are reverse-geocoded automatically (after `extras`).
+Two complementary options:
+
+**A) From the device** — Nextcloud mobile app → **Auto Upload** into your photo folder. `crons` then runs `memories:index` every 15 min (new photos appear) and `autodate.py` every 30 min (filename-based dates for dateless files like screenshots). Photos with GPS are reverse-geocoded automatically (after `extras`).
+
+**B) Straight from iCloud (`autopull`)** — keep pulling new photos out of iCloud automatically, even from devices that aren't running the Nextcloud app:
+
+```bash
+./icloud2nc.sh pull        # do this once interactively to establish the session
+./icloud2nc.sh autopull on # schedule incremental pulls (default: every 6 hours)
+./icloud2nc.sh autopull status
+./icloud2nc.sh autopull off
+```
+
+- It installs a cron per account that has an Apple ID stored (from `accounts add`), running `pull --auto` — an **incremental** sync (`--until-found`, default 100) that stops once it hits already-downloaded photos, so it's cheap. New photos land in that account's `Photos/Icloud`, already dated, and get indexed.
+- **No password is stored.** `autopull` reuses the icloudpd session cookie from your interactive `pull`. Apple sessions expire periodically; when that happens the cron logs a notice (`~/icloud_migration/logs/autopull-<account>.log`) and you just run `pull` once to re-authenticate (2FA).
+- Tune cadence with `AUTOPULL_CRON` (a cron expression) and depth with `ICLOUDPD_UNTIL`.
 
 ---
 

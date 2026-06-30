@@ -1,23 +1,26 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.4  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.5  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = manage multiple Nextcloud accounts and pick the migration target
+#  autopull = schedule icloudpd to auto-fetch NEW photos into the right account
 #  Two ways to GET photos: (1) privacy.apple.com export -> download, or
 #  (2) pull = direct download via icloudpd (interactive Apple login).
 #  Photos land in /Photos (Memories); iCloud Drive docs land in /Files/iCloud.
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.4"
+VERSION="2.5"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
 CONF_DIR="${CONF_DIR:-$HOME/.config/icloud2nc}"; ACCT_DIR="$CONF_DIR/accounts"; CURRENT_FILE="$CONF_DIR/current"
 mkdir -p "$ACCT_DIR" 2>/dev/null
 ACTIVE_ACCT=""
-if [ -f "$CURRENT_FILE" ]; then ACTIVE_ACCT="$(cat "$CURRENT_FILE" 2>/dev/null)"
+if [ -n "${ICLOUD2NC_ACCOUNT:-}" ] && [ -f "$ACCT_DIR/${ICLOUD2NC_ACCOUNT}.conf" ]; then
+  ACTIVE_ACCT="$ICLOUD2NC_ACCOUNT"; . "$ACCT_DIR/${ICLOUD2NC_ACCOUNT}.conf"
+elif [ -f "$CURRENT_FILE" ]; then ACTIVE_ACCT="$(cat "$CURRENT_FILE" 2>/dev/null)"
   [ -n "$ACTIVE_ACCT" ] && [ -f "$ACCT_DIR/$ACTIVE_ACCT.conf" ] && . "$ACCT_DIR/$ACTIVE_ACCT.conf"
 fi
 
@@ -35,6 +38,8 @@ DB_HOST="${DB_HOST:-127.0.0.1}"; DB_PORT="${DB_PORT:-3306}"
 ASSUME_YES="${ASSUME_YES:-0}"
 APPLE_ID="${APPLE_ID:-}"
 ICLOUDPD_OPTS="${ICLOUDPD_OPTS:-}"
+AUTOPULL_CRON="${AUTOPULL_CRON:-0 */6 * * *}"   # how often autopull checks iCloud
+ICLOUDPD_UNTIL="${ICLOUDPD_UNTIL:-100}"        # incremental: stop after N already-downloaded
 # ============================================================================
 
 EXIFTOOL="${WORK}/tools/bin/exiftool"
@@ -50,6 +55,7 @@ DRIVE_INCOMING="${DRIVE_INCOMING:-${WORK}/drive_incoming}"
 ICLOUDPD_BIN="${ICLOUDPD_BIN:-icloudpd}"
 ICLOUDPD_VENV="${ICLOUDPD_VENV:-${WORK}/tools/icloudpd-venv}"
 GETPIP_URL="${GETPIP_URL:-https://bootstrap.pypa.io/get-pip.py}"
+ICLOUDPD_COOKIES="${ICLOUDPD_COOKIES:-${WORK}/tools/icloudpd-cookies}"
 FAVCAT='_$!<Favorite>!$_'
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 mkdir -p "$WORK/incoming" "$WORK/metadata" "$STATE" "$LOGDIR" "$LIBDIR" "$ICLOUD_DIR" 2>/dev/null
@@ -192,29 +198,58 @@ _icloudpd_install(){
 
 pull(){
   _icloudpd_install
-  local id="${1:-$APPLE_ID}"
-  [ -n "$id" ] || read -r -p "Apple ID (email): " id
+  local id="" auto=0 a
+  for a in "$@"; do case "$a" in --auto) auto=1;; --*) ICLOUDPD_OPTS="${ICLOUDPD_OPTS:-} $a";; *) [ -z "$id" ] && id="$a";; esac; done
+  [ -n "$id" ] || id="$APPLE_ID"
+  if [ -z "$id" ]; then
+    [ "$auto" = 1 ] && { warn "autopull: no Apple ID stored for '$NC_USER' (set one via: accounts add)"; return 0; }
+    read -r -p "Apple ID (email): " id
+  fi
   [ -n "$id" ] || die "no Apple ID given (set APPLE_ID, or run: pull you@example.com)"
   mkdir -p "$ICLOUD_DIR"
-  banner "Direct iCloud download via icloudpd -> $ICLOUD_DIR"
-  warn "icloudpd will prompt for your Apple password + 2FA in THIS terminal."
-  warn "This tool does not store or read your credentials; auth is between you and Apple."
-  warn "Needs an interactive terminal for the 2FA prompt."
-  "$ICLOUDPD_BIN" \
-    --directory "$ICLOUD_DIR" \
-    --username "$id" \
-    --size original \
-    --live-photo-size original \
-    --set-exif-datetime \
-    --folder-structure none \
-    --no-progress-bar \
-    ${ICLOUDPD_OPTS:-} || warn "icloudpd exited non-zero (auth/network/interrupt) -- safe to re-run; it resumes"
-  log "files:scan"
-  occ files:scan --path="${NC_USER}/files/${REL_ICLOUD}" | nostderr | tail -4 | tee -a "$LOG"
-  log "memories:index"
-  occ memories:index | nostderr | tail -3 | tee -a "$LOG"
-  ok "icloudpd sync complete: $(lib_files) files (already dated by icloudpd). Albums/Favorites are not included by this path."
-  echo "  Tip: for incremental runs, set ICLOUDPD_OPTS='--until-found 50' (stop after 50 already-downloaded)."; }
+  banner "icloudpd -> $ICLOUD_DIR  (account: $NC_USER)"
+  if [ "$auto" = 1 ]; then
+    log "autopull (incremental, --until-found $ICLOUDPD_UNTIL) for $NC_USER as $id"
+    "$ICLOUDPD_BIN" --directory "$ICLOUD_DIR" --username "$id" --size original --live-photo-size original --set-exif-datetime --folder-structure none --no-progress-bar --until-found "$ICLOUDPD_UNTIL" ${ICLOUDPD_OPTS:-} </dev/null || { warn "icloudpd auto run failed -- the iCloud session likely expired; run 'pull' interactively once to re-auth (2FA)"; return 0; }
+  else
+    warn "icloudpd will prompt for your Apple password + 2FA in THIS terminal."
+    warn "This tool does not store or read your credentials; auth is between you and Apple."
+    "$ICLOUDPD_BIN" --directory "$ICLOUD_DIR" --username "$id" --size original --live-photo-size original --set-exif-datetime --folder-structure none --no-progress-bar ${ICLOUDPD_OPTS:-} || warn "icloudpd exited non-zero (auth/network/interrupt) -- safe to re-run; it resumes"
+  fi
+  log "files:scan"; occ files:scan --path="${NC_USER}/files/${REL_ICLOUD}" | nostderr | tail -4 | tee -a "$LOG"
+  log "memories:index"; occ memories:index | nostderr | tail -3 | tee -a "$LOG"
+  ok "icloudpd sync complete: $(lib_files) files in $ICLOUD_DIR (already dated). Albums/Favorites need the export path."; }
+
+# Schedule icloudpd to AUTO-fetch new photos into each account that has an Apple
+# ID stored. Reuses the session cookie from your interactive 'pull' (no password
+# is stored). New photos land in that account's Photos/Icloud, dated + indexed.
+autopull(){ local action="${1:-on}"; local tag="# icloud2nc-autopull"
+  case "$action" in
+    on|install|enable)
+      local lines n=0 fcfg name aid
+      lines="$(crontab -l 2>/dev/null | grep -v "$tag")"
+      shopt -s nullglob
+      for fcfg in "$ACCT_DIR"/*.conf; do
+        name=$(basename "$fcfg" .conf); aid=$(. "$fcfg"; echo "${APPLE_ID:-}")
+        [ -n "$aid" ] || continue
+        lines="$(printf '%s\n%s ICLOUD2NC_ACCOUNT=%s %s pull --auto >> %s/autopull-%s.log 2>&1 %s' "$lines" "$AUTOPULL_CRON" "$name" "$SELF" "$LOGDIR" "$name" "$tag")"
+        n=$((n+1)); log "   scheduled autopull for '$name' ($aid)"
+      done
+      if [ "$n" = 0 ] && [ -n "$APPLE_ID" ]; then
+        lines="$(printf '%s\n%s %s pull --auto >> %s/autopull.log 2>&1 %s' "$lines" "$AUTOPULL_CRON" "$SELF" "$LOGDIR" "$tag")"; n=1; log "   scheduled autopull for the default account"
+      fi
+      [ "$n" -gt 0 ] || { warn "no account has an Apple ID set -- run 'accounts add' (it asks for Apple ID), then re-run 'autopull on'."; return 0; }
+      printf '%s\n' "$lines" | crontab -
+      ok "autopull installed for $n account(s); schedule: $AUTOPULL_CRON"
+      echo "  It reuses the icloudpd session from your interactive 'pull'."
+      echo "  When Apple expires the session, run 'pull' once (interactively) to re-auth.";;
+    off|remove|disable)
+      crontab -l 2>/dev/null | grep -v "$tag" | crontab - 2>/dev/null; ok "autopull schedule removed";;
+    status|list)
+      banner "autopull schedule"; crontab -l 2>/dev/null | grep "$tag" || echo "  (not installed)";;
+    run) shift; pull --auto "$@";;
+    *) echo "usage: autopull [on | off | status]";;
+  esac; }
 
 verify_zips(){ local bad=0; shopt -s nullglob
   for z in "$WORK"/incoming/*.zip; do unzip -l "$z" >/dev/null 2>&1 || { warn "bad/incomplete: $(basename "$z")"; bad=$((bad+1)); }; done
@@ -351,7 +386,7 @@ menu(){ while true; do
  11) report   12) all     13) backup   14) dedupe   15) faces
  16) hwaccel  17) contacts 18) calendars 19) prune  20) clean
  21) drive (iCloud Drive -> Files)  22) pull (icloudpd)  23) accounts (add/switch)
-  q) quit
+ 24) autopull (auto-sync new photos)                     q) quit
 M
   read -r -p "choose: " ch; case "$ch" in
     1) doctor;; 2) acquire_lock; tools; release_lock;; 3) links;; 4) acquire_lock; download; release_lock;;
@@ -361,6 +396,7 @@ M
     16) hwaccel;; 17) contacts;; 18) calendars;; 19) acquire_lock; prune; release_lock;; 20) clean;;
     21) acquire_lock; drive; release_lock;; 22) acquire_lock; pull; release_lock;;
     23) _accounts_interactive;;
+    24) autopull status; read -r -p "autopull [o]n / o[f]f / [Enter]=back: " x; case "$x" in o|O) autopull on;; f|F) autopull off;; esac;;
     q|Q) break;; *) warn "?";; esac
   done; }
 
@@ -526,7 +562,8 @@ while true; do case "${1:-}" in -y|--yes) ASSUME_YES=1; shift;; --dry-run) DRY=1
 case "${1:-menu}" in
   doctor) doctor;; tools) acquire_lock; tools; release_lock;; links) links;;
   download) shift; acquire_lock; download "$@"; release_lock;;
-  pull|icloudpd) shift; acquire_lock; pull "${1:-}"; release_lock;;
+  pull|icloudpd) shift; acquire_lock; pull "$@"; release_lock;;
+  autopull) shift; autopull "${1:-on}";;
   import) acquire_lock; import; release_lock;; albums) acquire_lock; albums; release_lock;;
   archive) acquire_lock; archive; release_lock;; extras) acquire_lock; extras; release_lock;;
   crons) crons;; status) status;; verify) verify;; report) report;; logs) shift; logs "${1:-40}";;
