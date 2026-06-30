@@ -1,24 +1,40 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.0  -- all-in-one iCloud Photos -> Nextcloud/Memories migration
-#  No args = interactive menu. Subcommands: doctor tools links download import
-#  albums archive extras crons status verify report logs resume all
+#  icloud2nc  v2.4  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  No args = interactive menu. Subcommands: doctor tools links download pull
+#  import albums archive extras crons status verify report logs resume all drive
+#  accounts = manage multiple Nextcloud accounts and pick the migration target
+#  Two ways to GET photos: (1) privacy.apple.com export -> download, or
+#  (2) pull = direct download via icloudpd (interactive Apple login).
+#  Photos land in /Photos (Memories); iCloud Drive docs land in /Files/iCloud.
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.1"
+VERSION="2.4"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
+
+# ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
+CONF_DIR="${CONF_DIR:-$HOME/.config/icloud2nc}"; ACCT_DIR="$CONF_DIR/accounts"; CURRENT_FILE="$CONF_DIR/current"
+mkdir -p "$ACCT_DIR" 2>/dev/null
+ACTIVE_ACCT=""
+if [ -f "$CURRENT_FILE" ]; then ACTIVE_ACCT="$(cat "$CURRENT_FILE" 2>/dev/null)"
+  [ -n "$ACTIVE_ACCT" ] && [ -f "$ACCT_DIR/$ACTIVE_ACCT.conf" ] && . "$ACCT_DIR/$ACTIVE_ACCT.conf"
+fi
 
 # ============================== CONFIG ======================================
 NC_USER="${NC_USER:-Aqua}"
 NC_FILES="${NC_FILES:-/storage/${NC_USER}/files}"
-ICLOUD_DIR="${ICLOUD_DIR:-${NC_FILES}/Icloud}"
-ALBUMS_DIR="${ALBUMS_DIR:-${NC_FILES}/Albums}"
+ICLOUD_DIR="${ICLOUD_DIR:-${NC_FILES}/Photos/Icloud}"
+ALBUMS_DIR="${ALBUMS_DIR:-${NC_FILES}/Photos/Albums}"
+FILES_DIR="${FILES_DIR:-${NC_FILES}/Files}"
+DRIVE_DIR="${DRIVE_DIR:-${FILES_DIR}/iCloud}"
 OCC="${OCC:-php ${HOME}/public_html/occ}"
 WORK="${WORK:-${HOME}/icloud_migration}"
 ALBUMS_PART="${ALBUMS_PART:-1}"
 DB_HOST="${DB_HOST:-127.0.0.1}"; DB_PORT="${DB_PORT:-3306}"
 ASSUME_YES="${ASSUME_YES:-0}"
+APPLE_ID="${APPLE_ID:-}"
+ICLOUDPD_OPTS="${ICLOUDPD_OPTS:-}"
 # ============================================================================
 
 EXIFTOOL="${WORK}/tools/bin/exiftool"
@@ -29,6 +45,9 @@ STATE="${WORK}/state"; LOGDIR="${WORK}/logs"; LIBDIR="${WORK}/lib"
 LOG="${LOGDIR}/icloud2nc-$(date +%Y%m%d).log"
 LOCK="${WORK}/.lock"
 REL_ICLOUD="${ICLOUD_DIR#${NC_FILES}/}"
+REL_FILES="${FILES_DIR#${NC_FILES}/}"
+DRIVE_INCOMING="${DRIVE_INCOMING:-${WORK}/drive_incoming}"
+ICLOUDPD_BIN="${ICLOUDPD_BIN:-icloudpd}"
 FAVCAT='_$!<Favorite>!$_'
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 mkdir -p "$WORK/incoming" "$WORK/metadata" "$STATE" "$LOGDIR" "$LIBDIR" "$ICLOUD_DIR" 2>/dev/null
@@ -85,10 +104,11 @@ doctor(){ local fail=0
   echo "  bg jobs mode : $(occ config:app:get core backgroundjobs_mode)  (want: cron)"
   echo "  exiftool     : $([ -x "$EXIFTOOL" ] && "$EXIFTOOL" -ver || echo 'missing -> run: tools')"
   echo "  ffmpeg       : $([ -x "$FFMPEG" ] && echo ok || echo 'missing -> run: tools')"
+  echo "  icloudpd     : $(command -v icloudpd >/dev/null 2>&1 && icloudpd --version 2>/dev/null | head -1 || echo 'not installed (installed on first: pull)')"
   echo "  data free    : $(free_gb "$NC_FILES") GB"
   echo "  GPU /dev/dri : $([ -d /dev/dri ] && echo yes || echo 'none (software transcode; fine on many cores)')"
-  echo "  php mem_limit: $(php -r 'echo ini_get(\"memory_limit\");' 2>/dev/null)"
-  echo "  memcache     : $(_dbget memcache.local || echo 'unset (set \\OC\\Memcache\\APCu for speed)')"
+  echo "  php mem_limit: $(php -r 'echo ini_get("memory_limit");' 2>/dev/null)"
+  echo "  memcache     : $(_dbget memcache.local || echo 'unset (set \OC\Memcache\APCu for speed)')"
   occ maintenance:mode 2>/dev/null | grep -qi 'enabled: *true' && warn "maintenance mode is ON (occ maintenance:mode --off)"
   [ $fail -eq 0 ] && ok "preflight passed" || warn "preflight found issues (above)"; return 0; }
 
@@ -123,6 +143,7 @@ Collect all part links without 21 manual copies:
 NOTE: Apple links expire within minutes; download right away.
 The Apple login is never automated: it needs your password + 2FA, and scripting
 Apple ID sign-in violates Apple's terms and can lock your account.
+TIP: prefer a live login? use 'pull' (icloudpd) instead of the export+download path.
 EOF
 }
 
@@ -132,6 +153,49 @@ download(){ local list="${1:-$WORK/parts.txt}"
   while read -r num url; do [ -z "${num:-}" ] && continue; case "$num" in \#*) continue;; esac
     log "download part $num"; nohup curl -sL -o "iCloud Photos Part ${num} of 21.zip" "$url" >/dev/null 2>&1 & n=$((n+1)); done < "$list"
   disown -a; ok "$n downloads started + detached (survive disconnect). Watch: ls -lah $WORK/incoming"; }
+
+# Direct download from iCloud using icloud_photos_downloader (icloudpd):
+#   https://github.com/icloud-photos-downloader/icloud_photos_downloader
+# An ALTERNATIVE to the privacy.apple.com export path. You authenticate
+# interactively: icloudpd prompts for your Apple password + 2FA. This tool
+# never stores or reads your credentials -- auth is between you and Apple.
+# Re-run any time to resume / fetch new photos (a session cookie is cached).
+_icloudpd_install(){
+  if command -v icloudpd >/dev/null 2>&1; then ICLOUDPD_BIN="$(command -v icloudpd)"; return 0; fi
+  if [ -x "$HOME/.local/bin/icloudpd" ]; then ICLOUDPD_BIN="$HOME/.local/bin/icloudpd"; return 0; fi
+  log "installing icloudpd (pip --user, no root needed)"
+  python3 -m pip install --user --upgrade icloudpd >/dev/null 2>&1 \
+    || pip3 install --user --upgrade icloudpd >/dev/null 2>&1 || true
+  if command -v icloudpd >/dev/null 2>&1; then ICLOUDPD_BIN="$(command -v icloudpd)"
+  elif [ -x "$HOME/.local/bin/icloudpd" ]; then ICLOUDPD_BIN="$HOME/.local/bin/icloudpd"
+  else die "icloudpd install failed; install manually: pip install icloudpd"; fi
+  ok "icloudpd ready: $ICLOUDPD_BIN"; }
+
+pull(){
+  _icloudpd_install
+  local id="${1:-$APPLE_ID}"
+  [ -n "$id" ] || read -r -p "Apple ID (email): " id
+  [ -n "$id" ] || die "no Apple ID given (set APPLE_ID, or run: pull you@example.com)"
+  mkdir -p "$ICLOUD_DIR"
+  banner "Direct iCloud download via icloudpd -> $ICLOUD_DIR"
+  warn "icloudpd will prompt for your Apple password + 2FA in THIS terminal."
+  warn "This tool does not store or read your credentials; auth is between you and Apple."
+  warn "Needs an interactive terminal for the 2FA prompt."
+  "$ICLOUDPD_BIN" \
+    --directory "$ICLOUD_DIR" \
+    --username "$id" \
+    --size original \
+    --live-photo-size original \
+    --set-exif-datetime \
+    --folder-structure none \
+    --no-progress-bar \
+    ${ICLOUDPD_OPTS:-} || warn "icloudpd exited non-zero (auth/network/interrupt) -- safe to re-run; it resumes"
+  log "files:scan"
+  occ files:scan --path="${NC_USER}/files/${REL_ICLOUD}" | nostderr | tail -4 | tee -a "$LOG"
+  log "memories:index"
+  occ memories:index | nostderr | tail -3 | tee -a "$LOG"
+  ok "icloudpd sync complete: $(lib_files) files (already dated by icloudpd). Albums/Favorites are not included by this path."
+  echo "  Tip: for incremental runs, set ICLOUDPD_OPTS='--until-found 50' (stop after 50 already-downloaded)."; }
 
 verify_zips(){ local bad=0; shopt -s nullglob
   for z in "$WORK"/incoming/*.zip; do unzip -l "$z" >/dev/null 2>&1 || { warn "bad/incomplete: $(basename "$z")"; bad=$((bad+1)); }; done
@@ -169,7 +233,7 @@ albums(){ local A="$WORK/metadata/Albums"; [ -d "$A" ] || die "no Albums metadat
       occ photos:albums:add "$NC_USER" "$name" "${REL_ICLOUD}/$img" >/dev/null 2>&1
       ln -f "$ICLOUD_DIR/$img" "$ALBUMS_DIR/$name/$img" 2>/dev/null; n=$((n+1)); done < <(tail -n +2 "$csv")
     tot=$((tot+n)); log "   $name: $n"; done
-  occ files:scan --path="${NC_USER}/files/Albums" >/dev/null 2>&1
+  occ files:scan --path="${NC_USER}/files/Photos/Albums" >/dev/null 2>&1
   _star_favorites "$A/Favorites.csv"
   ok "albums done: $na albums (Memories + folders), $tot memberships"; }
 
@@ -253,7 +317,7 @@ all(){ acquire_lock; sync_helpers
   confirm "Proceed with the full run?" || { warn "aborted"; release_lock; exit 0; }
   done_mark tools || stage tools "Install tools" "1-2m" tools || true
   if [ -f "$WORK/parts.txt" ]; then stage download "Download parts" "bandwidth-bound" download || true
-  else warn "no parts.txt -> skipping download (add links, run 'download')"; fi
+  else warn "no parts.txt -> skipping download (add links, run 'download'; or use 'pull')"; fi
   stage import "Import media" "1-3h" import || true
   stage albums "Reconstruct albums" "30-40m" albums || true
   stage extras "Geocoding + AI + previews" "minutes" extras || true
@@ -266,7 +330,9 @@ menu(){ while true; do
   1) doctor    2) tools    3) links    4) download   5) import
   6) albums    7) extras   8) crons    9) status    10) verify
  11) report   12) all     13) backup   14) dedupe   15) faces
- 16) hwaccel  17) contacts 18) calendars 19) prune  20) clean   q) quit
+ 16) hwaccel  17) contacts 18) calendars 19) prune  20) clean
+ 21) drive (iCloud Drive -> Files)  22) pull (icloudpd)  23) accounts (add/switch)
+  q) quit
 M
   read -r -p "choose: " ch; case "$ch" in
     1) doctor;; 2) acquire_lock; tools; release_lock;; 3) links;; 4) acquire_lock; download; release_lock;;
@@ -274,11 +340,12 @@ M
     8) crons;; 9) status;; 10) verify;; 11) report;; 12) all;;
     13) acquire_lock; backup; release_lock;; 14) acquire_lock; dedupe; release_lock;; 15) faces;;
     16) hwaccel;; 17) contacts;; 18) calendars;; 19) acquire_lock; prune; release_lock;; 20) clean;;
+    21) acquire_lock; drive; release_lock;; 22) acquire_lock; pull; release_lock;;
+    23) _accounts_interactive;;
     q|Q) break;; *) warn "?";; esac
   done; }
 
-usage(){ sed -n '2,8p' "$0"; }
-
+usage(){ sed -n '2,10p' "$0"; }
 
 backup(){ local d="$WORK/backups/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$d"
   log "backing up DB + config -> $d"
@@ -317,12 +384,118 @@ calendars(){ local d="$WORK/calendars"; mkdir -p "$d"; local n=0
   while IFS= read -r ff; do cp -f "$ff" "$d/"; n=$((n+1)); done < <(find "$WORK" -iname '*.ics' 2>/dev/null)
   [ "$n" -gt 0 ] && ok "collected $n .ics file(s) -> $d  (Nextcloud Calendar -> Settings -> Import)" || warn "no .ics files found under $WORK"; }
 
+drive(){
+  local src="${1:-$DRIVE_INCOMING}"
+  mkdir -p "$DRIVE_DIR" "$DRIVE_INCOMING"
+  banner "iCloud Drive to Nextcloud Files: $DRIVE_DIR"
+  shopt -s nullglob
+  local tmp z
+  local zips=()
+  if [ -f "$src" ] && [[ "$src" == *.zip ]]; then
+    zips+=("$src")
+  elif [ -d "$src" ]; then
+    for z in "$src"/*.zip; do zips+=("$z"); done
+  fi
+  log "$(free_gb "$NC_FILES") GB free on data volume"
+  if [ "${#zips[@]}" -gt 0 ]; then
+    log "extracting ${#zips[@]} Drive zip archives; structure and dates preserved"
+    tmp=$(mktemp -d)
+    for z in "${zips[@]}"; do
+      if unzip -l "$z" >/dev/null 2>&1; then
+        unzip -o "$z" -d "$tmp" >/dev/null 2>&1 && log "   extracted $(basename "$z")"
+      else
+        warn "bad or incomplete zip: $(basename "$z")"
+      fi
+    done
+    if [ -d "$tmp/iCloud Drive" ]; then
+      cp -a "$tmp/iCloud Drive/." "$DRIVE_DIR/"
+    else
+      cp -a "$tmp/." "$DRIVE_DIR/"
+    fi
+    rm -rf "$tmp"
+  elif [ -d "$src" ]; then
+    log "copying files from $src into the Drive folder"
+    cp -a "$src/." "$DRIVE_DIR/"
+  else
+    die "nothing to import; put Drive export zips in $DRIVE_INCOMING or run: drive /path"
+  fi
+  log "files:scan"
+  occ files:scan --path="${NC_USER}/files/${REL_FILES}" | nostderr | tail -4 | tee -a "$LOG"
+  local nfiles sz
+  nfiles=$(find "$DRIVE_DIR" -type f 2>/dev/null | wc -l)
+  sz=$(du -sh "$DRIVE_DIR" 2>/dev/null | cut -f1)
+  ok "iCloud Drive imported: $nfiles files, $sz; in Files app only, not in Memories"
+  echo "  Tip: for ongoing sync of new files, point the Nextcloud app at ${REL_FILES}/iCloud"
+}
+
+accounts(){ local sub="${1:-list}"; [ $# -gt 0 ] && shift
+  case "$sub" in
+    list|ls) _accounts_list;;
+    add|new) _accounts_add "${1:-}";;
+    use|select|switch) _accounts_use "${1:-}";;
+    current|who) echo "active account: ${ACTIVE_ACCT:-<default>}  (NC user: $NC_USER)";;
+    remove|rm|del) _accounts_remove "${1:-}";;
+    prep) _account_prep "$NC_USER";;
+    *) echo "usage: accounts [list | add <name> | use <name> | current | remove <name> | prep]";;
+  esac; }
+
+_accounts_list(){ banner "Accounts"
+  shopt -s nullglob; local f n u found=0
+  for f in "$ACCT_DIR"/*.conf; do found=1; n=$(basename "$f" .conf); u=$(. "$f"; echo "$NC_USER")
+    if [ "$n" = "${ACTIVE_ACCT:-}" ]; then printf '  * %-16s NC user: %s   (ACTIVE)\n' "$n" "$u"
+    else printf '    %-16s NC user: %s\n' "$n" "$u"; fi; done
+  [ "$found" = 0 ] && echo "  (no profiles yet -- add one:  accounts add <name>)"
+  echo "  in use right now -> NC_USER=$NC_USER"; }
+
+_accounts_add(){ local name="$1"; [ -n "$name" ] || read -r -p "Profile label: " name
+  [ -n "$name" ] || { warn "no name"; return 1; }
+  local uid; read -r -p "Nextcloud username (uid) [$name]: " uid; uid="${uid:-$name}"
+  if ! occ user:info "$uid" >/dev/null 2>&1; then
+    if confirm "Nextcloud user '$uid' does not exist. Create it now?"; then
+      local dn pw pw2; read -r -p "Display name [$uid]: " dn; dn="${dn:-$uid}"
+      read -r -s -p "Set password for $uid: " pw; echo; read -r -s -p "Repeat password: " pw2; echo
+      if [ -z "$pw" ] || [ "$pw" != "$pw2" ]; then warn "passwords empty/mismatch -- not creating user"
+      else OC_PASS="$pw" $OCC user:add --password-from-env --display-name "$dn" "$uid" 2>&1 | nostderr | tail -3; fi
+      unset pw pw2
+    else warn "not creating; profile will still point at '$uid'"; fi
+  fi
+  local aid; read -r -p "Apple ID for this account (optional, for 'pull'): " aid
+  { echo "# icloud2nc account profile"; echo "NC_USER=\"$uid\""; [ -n "$aid" ] && echo "APPLE_ID=\"$aid\""; } > "$ACCT_DIR/$name.conf"
+  ok "saved profile '$name' -> NC user '$uid'"
+  _account_prep "$uid"
+  echo "$name" > "$CURRENT_FILE"; ok "active account -> $name (all photos/files now target '$uid')"; }
+
+_accounts_use(){ local name="$1"; [ -n "$name" ] || { _accounts_list; read -r -p "use which profile? " name; }
+  { [ -n "$name" ] && [ -f "$ACCT_DIR/$name.conf" ]; } || { warn "no such profile: $name"; return 1; }
+  echo "$name" > "$CURRENT_FILE"
+  local u; u=$(. "$ACCT_DIR/$name.conf"; echo "$NC_USER")
+  ok "active account -> $name (NC user '$u'). All commands now target this account."; }
+
+_accounts_remove(){ local name="$1"; [ -n "$name" ] || { warn "which profile?"; return 1; }
+  [ -f "$ACCT_DIR/$name.conf" ] || { warn "no such profile: $name"; return 1; }
+  confirm "Remove profile '$name'? (does NOT delete the Nextcloud user or any files)" || return 0
+  rm -f "$ACCT_DIR/$name.conf"
+  [ "$(cat "$CURRENT_FILE" 2>/dev/null)" = "$name" ] && rm -f "$CURRENT_FILE"
+  ok "removed profile '$name'"; }
+
+_account_prep(){ local u="${1:-$NC_USER}" dd nf
+  dd=$(_dbget datadirectory); dd="${dd:-/storage}"; nf="$dd/$u/files"
+  banner "Preparing folders + Memories for '$u'"
+  mkdir -p "$nf/Photos/Icloud" "$nf/Photos/Albums" "$nf/Files/iCloud" 2>/dev/null
+  touch "$nf/Photos/Albums/.nomedia" 2>/dev/null
+  occ files:scan --path="$u/files" >/dev/null 2>&1 || warn "scan skipped (new user may need a first web login to create its home)"
+  occ user:setting "$u" memories timelinePath "/Photos/Icloud" >/dev/null 2>&1
+  ok "ready: '$u' -> Photos/Icloud (Memories timeline), Files/iCloud (documents)"; }
+
+_accounts_interactive(){ _accounts_list
+  read -r -p "action: [a]dd  [u]se  [r]emove  [Enter]=back: " x
+  case "$x" in a|A) _accounts_add "";; u|U) read -r -p "profile name: " nm; _accounts_use "$nm";; r|R) read -r -p "profile name: " nm; _accounts_remove "$nm";; esac; }
+
 prune(){ confirm "Delete the downloaded part zips in $WORK/incoming to reclaim space?" || { warn "cancelled"; return 0; }
   local b; b=$(du -sh "$WORK/incoming" 2>/dev/null | cut -f1); maybe rm -f "$WORK"/incoming/*.zip; ok "removed downloaded zips (freed ~${b:-0})"; }
 
 clean(){ confirm "Remove scratch (metadata/state/logs)? Your photo library is NOT touched." || { warn "cancelled"; return 0; }
   maybe rm -rf "$WORK/metadata" "$STATE"; maybe rm -f "$LOGDIR"/*.log; ok "scratch cleared"; }
-
 
 DRY="${DRY:-0}"
 while true; do case "${1:-}" in -y|--yes) ASSUME_YES=1; shift;; --dry-run) DRY=1; shift;; *) break;; esac; done
@@ -330,11 +503,14 @@ while true; do case "${1:-}" in -y|--yes) ASSUME_YES=1; shift;; --dry-run) DRY=1
 case "${1:-menu}" in
   doctor) doctor;; tools) acquire_lock; tools; release_lock;; links) links;;
   download) shift; acquire_lock; download "$@"; release_lock;;
+  pull|icloudpd) shift; acquire_lock; pull "${1:-}"; release_lock;;
   import) acquire_lock; import; release_lock;; albums) acquire_lock; albums; release_lock;;
   archive) acquire_lock; archive; release_lock;; extras) acquire_lock; extras; release_lock;;
   crons) crons;; status) status;; verify) verify;; report) report;; logs) shift; logs "${1:-40}";;
   backup) acquire_lock; backup; release_lock;; dedupe) shift; acquire_lock; dedupe "${1:-}"; release_lock;;
   faces) faces;; hwaccel) hwaccel;; contacts) shift; contacts "${1:-}";; calendars) calendars;;
+  drive) shift; acquire_lock; drive "${1:-}"; release_lock;;
+  accounts|account) shift; accounts "$@";;
   prune) acquire_lock; prune; release_lock;; clean) clean;;
   resume) resume;; all) all;; menu) menu;; help|-h|--help) usage;; *) err "unknown: $1"; usage;;
 esac

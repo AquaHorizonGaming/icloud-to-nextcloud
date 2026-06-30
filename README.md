@@ -1,6 +1,6 @@
 # iCloud → Nextcloud Migration (Pro Edition)
 
-**`icloud2nc`** — one command-line tool to migrate your entire **iCloud Photos** export into **Nextcloud + Memories**, with dates, locations, albums, and favorites intact. Battle-tested on a real ~500 GB / ~54,000-item library.
+**`icloud2nc`** — one command-line tool to migrate your entire **iCloud Photos** (and **iCloud Drive**) into **Nextcloud + Memories**, with dates, locations, albums, and favorites intact. Battle-tested on a real ~500 GB / ~54,000-item library.
 
 ```bash
 nano icloud2nc.sh     # edit the CONFIG block (NC_USER, paths, OCC)
@@ -9,6 +9,18 @@ nano icloud2nc.sh     # edit the CONFIG block (NC_USER, paths, OCC)
 ```
 
 It does what the basic guides skip: handles server-side **encryption**, repairs **video dates** the fast way, restores **photo EXIF** in one batch, downloads parts straight to the server, sets **real Favorites stars**, builds Memories albums **and** matching folders, adds geocoding + AI tagging, and installs a self-maintaining pipeline for new phone photos.
+
+### Highlights
+
+- **Two ways to fetch photos** — the privacy.apple.com export (`download`) *or* a direct live pull via [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader) (`pull`).
+- **Clean separation** — photos live in `/Photos` (the Memories timeline); iCloud Drive documents land in `/Files/iCloud` (Files app only).
+- **Multiple accounts** — save a profile per Nextcloud user and switch which one everything targets (`accounts`).
+- **Correct dates** — photo EXIF + video mtime restored from the export metadata, so the timeline isn't a pile of "today."
+- **Albums, Favorites, Hidden** — reconstructed as real Memories albums, folder views, favorite stars, and an out-of-timeline archive.
+- **AI + maps** — Recognize (faces/objects), reverse-geocoding, preview pre-generation.
+- **Safe by design** — every stage is resumable, logged, run-locked; destructive steps confirm and support `--dry-run`.
+
+> **New in v2.4:** `drive` (iCloud Drive import), `pull` (icloudpd direct download), and `accounts` (multi-account targeting).
 
 ---
 
@@ -46,6 +58,7 @@ Many videos export with a junk `0000:00:00` date, so Memories dumps them at "tod
 | `tools`    | Install `exiftool` + static `ffmpeg`/`ffprobe` (no root) and wire into Memories |
 | `links`    | How to harvest all part links in one click (see `get_links.js`) |
 | `download` | Parallel, detach-safe server-side download from `parts.txt` |
+| `pull`     | **Direct** download from iCloud via [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader) — interactive Apple login (no export needed) |
 | `import`   | Extract → restore photo EXIF → fix video dates → scan → index |
 | `albums`   | Memories albums + matching `/Albums/` folders (hardlinks) + Favorites stars |
 | `archive`  | Optional: move **Hidden** items out of the main timeline |
@@ -63,8 +76,10 @@ Many videos export with a junk `0000:00:00` date, so Memories dumps them at "tod
 | `hwaccel`  | Enable GPU/VAAPI transcoding if `/dev/dri` exists |
 | `contacts` | Merge exported vCards into one file for import (`--strip-photos` optional) |
 | `calendars`| Collect exported `.ics` files for import |
+| `drive`    | Migrate **iCloud Drive** documents into `/Files/iCloud` (Files app only, kept out of the Memories timeline) |
 | `prune`    | Delete the downloaded part zips to reclaim space |
 | `clean`    | Clear scratch (metadata/state/logs) — library untouched |
+| `accounts` | Manage **multiple Nextcloud accounts** and pick which one all photos/files target |
 
 Run with **no argument** for an interactive menu. Every stage is **resumable** (state under `~/icloud_migration/state/`), fully **logged** (`~/icloud_migration/logs/`), and guarded by a **run-lock** so two heavy runs can't collide.
 
@@ -123,11 +138,129 @@ The Apple login is **never automated** — it needs your password + 2FA, and scr
 
 ---
 
+## Two ways to get your photos
+
+**A) privacy.apple.com export** (`links` → `download` → `import`) — Apple builds a one-time archive you download in parts. Includes album membership, favorites, and hidden flags (which `albums`/`archive` then reconstruct). Best for a complete one-shot migration.
+
+**B) Direct download** (`pull`) — uses [**icloudpd**](https://github.com/icloud-photos-downloader/icloud_photos_downloader) to pull straight from your iCloud library over the API. No waiting on an export, and great for **incremental** top-ups later.
+
+```bash
+./icloud2nc.sh pull                      # prompts for Apple ID, then password + 2FA
+./icloud2nc.sh pull you@example.com      # or pass the Apple ID
+APPLE_ID=you@example.com ./icloud2nc.sh pull
+```
+
+- **Auth is interactive and yours** — icloudpd prompts for your Apple **password + 2FA** in the terminal. This tool never stores or reads your credentials; a session cookie is cached by icloudpd so re-runs don't re-prompt. Needs an interactive terminal for the 2FA step.
+- Files download already-dated (icloudpd sets EXIF), straight into `/Photos/Icloud`, then the tool runs `files:scan` + `memories:index`.
+- Tune with `ICLOUDPD_OPTS`, e.g. `ICLOUDPD_OPTS='--until-found 50'` for fast incremental syncs, or `--recent 500` for just the latest.
+- Note: the `pull` path brings **media only** — album/favorite/hidden reconstruction is exclusive to the export path (those live in the export CSVs).
+
+> First `pull` auto-installs icloudpd with `pip install --user icloudpd` (no root).
+
+---
+
 ## Going forward (new phone photos)
 
 1. Nextcloud mobile app → **Auto Upload** to your photo folder.
 2. `crons` installs `memories:index` every 15 min (new photos appear) and `autodate.py` every 30 min (filename-based dates for dateless files like screenshots).
 3. Photos with GPS are reverse-geocoded automatically (after `extras`).
+
+---
+
+## Multiple accounts
+
+Migrate more than one person's library — each Nextcloud user is a saved **profile**, and a command picks which one everything targets.
+
+```bash
+./icloud2nc.sh accounts add mom        # create/link a profile (offers to create the NC user)
+./icloud2nc.sh accounts list           # see all profiles; * marks the active one
+./icloud2nc.sh accounts use mom        # switch — every later command now targets 'mom'
+./icloud2nc.sh accounts current        # show the active account
+./icloud2nc.sh pull                    # ...downloads into mom's library
+./icloud2nc.sh accounts use me         # switch back
+```
+
+- `accounts add` asks for the Nextcloud username, offers to **create that user** if it doesn't exist (you type the password — the tool passes it straight to `occ user:add` and never stores it), optionally saves an Apple ID for `pull`, then prepares that user's `Photos/Icloud` + `Files/iCloud` folders and points Memories at the right path.
+- The active account is remembered in `~/.config/icloud2nc/current`; profiles live in `~/.config/icloud2nc/accounts/<name>.conf`.
+- Every command (`download`, `pull`, `import`, `albums`, `drive`, `status`, …) automatically uses the selected account's user and paths. No active account = the default in the CONFIG block.
+
+## Layout: Photos vs Files
+
+The tool keeps your **media** and your **documents** cleanly separated:
+
+```
+/Photos/
+   Icloud/     ← all photos & videos (this is the Memories timeline)
+   Albums/     ← album folders (hardlinks), excluded from the timeline via .nomedia
+/Files/
+   iCloud/     ← iCloud Drive documents (Files app only — NOT in Memories)
+```
+
+Memories' timeline path is set to `/Photos/Icloud`, so **Memories shows only your photos** and the **Files app** is where your documents live.
+
+## Migrating iCloud Drive (the `drive` command)
+
+iCloud *Photos* and iCloud *Drive* are separate exports. To bring your Drive documents over:
+
+1. On [privacy.apple.com](https://privacy.apple.com), request/download your **iCloud Drive** data (delivered as one or more `.zip`s that already preserve folder structure and modified-times).
+2. Put the zip(s) in `~/icloud_migration/drive_incoming/` (or anywhere), then run:
+
+```bash
+./icloud2nc.sh drive                       # uses drive_incoming/
+./icloud2nc.sh drive /path/to/zips         # a folder of zips
+./icloud2nc.sh drive /path/to/export.zip   # a single zip
+./icloud2nc.sh drive /path/to/folder       # already-extracted files
+```
+
+It extracts into `/Files/iCloud` (stripping Apple's `iCloud Drive/` wrapper), preserves dates, runs a scan, and **keeps everything out of the Memories timeline** so your photo dates stay clean. For *ongoing* sync of new files, point the Nextcloud desktop/mobile app at the `Files/iCloud` folder.
+
+---
+
+## Recipes
+
+**Full migration from the Apple export (the classic path):**
+
+```bash
+./icloud2nc.sh doctor      # fix flagged issues (esp. encryption OFF)
+./icloud2nc.sh tools       # exiftool + ffmpeg
+# harvest links with get_links.js -> parts.txt
+./icloud2nc.sh download
+./icloud2nc.sh import       # extract + restore dates + scan + index
+./icloud2nc.sh albums       # albums + folders + favorites
+./icloud2nc.sh extras       # geocode + AI + previews
+./icloud2nc.sh crons        # going-forward automation
+./icloud2nc.sh verify
+```
+
+**Skip the export — pull straight from iCloud:**
+
+```bash
+./icloud2nc.sh doctor && ./icloud2nc.sh tools
+./icloud2nc.sh pull you@example.com   # interactive Apple password + 2FA
+./icloud2nc.sh extras && ./icloud2nc.sh crons
+```
+
+**Migrate a second person onto the same server:**
+
+```bash
+./icloud2nc.sh accounts add partner   # creates the NC user + folders
+./icloud2nc.sh pull partner@icloud.com
+# ...later, switch back:
+./icloud2nc.sh accounts use me
+```
+
+**Bring in iCloud Drive documents (any account):**
+
+```bash
+./icloud2nc.sh accounts use partner   # optional: pick the target
+./icloud2nc.sh drive ~/Downloads/iCloudDrive.zip
+```
+
+**Incremental top-up later (only new photos):**
+
+```bash
+ICLOUDPD_OPTS='--until-found 50' ./icloud2nc.sh pull
+```
 
 ---
 
@@ -148,12 +281,16 @@ Example: `./icloud2nc.sh --yes import`  ·  `./icloud2nc.sh --dry-run dedupe --r
 - **Favorites view empty** — re-run `albums` (it stars `Favorites.csv`), then refresh the Favorites view.
 - **Duplicate albums** — happens if `albums` was interrupted then re-run; `verify` reports them.
 - **Location missing** — can't be invented; only photos with embedded GPS get mapped.
+- **`pull` can't ask for 2FA** — icloudpd needs an interactive terminal for the code; run it in a real SSH/terminal session, not a non-interactive script. Re-run to resume; the session cookie is cached.
+- **`pull` 2FA every time** — the cookie directory isn't persisting; keep the same `$HOME` between runs (icloudpd stores its session under it).
+- **New account shows nothing / scan skipped** — a brand-new Nextcloud user's home isn't created until first login. Log into the web UI once as that user, then `accounts use <name>` and re-run `accounts prep`.
+- **iCloud Drive files appear in the photo timeline** — make sure they went to `/Files/iCloud` (via `drive`), not under `/Photos`.
 
 ---
 
 ## Requirements
 
-Shell access + `occ`; `unzip`, `python3`, `perl`, `curl`; the Memories app installed; background jobs in **cron** mode. `tools` installs exiftool + ffmpeg without root.
+Shell access + `occ`; `unzip`, `python3`, `perl`, `curl`; the Memories app installed; background jobs in **cron** mode. `tools` installs exiftool + ffmpeg without root. The `pull` command auto-installs [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader) via `pip install --user` on first use (needs `python3`/`pip`). For `pull` you also need an interactive terminal so you can enter your Apple 2FA code.
 
 ## Files
 
