@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.8  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.9  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -12,7 +12,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.8"
+VERSION="2.9"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -41,6 +41,7 @@ APPLE_ID="${APPLE_ID:-}"
 ICLOUDPD_OPTS="${ICLOUDPD_OPTS:-}"
 AUTOPULL_CRON="${AUTOPULL_CRON:-0 */6 * * *}"   # how often autopull checks iCloud
 ICLOUDPD_UNTIL="${ICLOUDPD_UNTIL:-100}"        # incremental: stop after N already-downloaded
+IDRIVE_WORKERS="${IDRIVE_WORKERS:-8}"          # parallel iCloud Drive downloads (drive-pull)
 # ============================================================================
 
 EXIFTOOL="${WORK}/tools/bin/exiftool"
@@ -599,7 +600,7 @@ drive_pull(){
   banner "iCloud Drive -> $DRIVE_DIR  (account: $NC_USER)"
   warn "icloudpy will prompt for your Apple password + 2FA in THIS terminal."
   warn "This tool does not store or read your credentials; auth is between you and Apple."
-  "$ICLOUDPD_VENV/bin/python" "$LIBDIR/idrive_download.py" --apple-id "$id" --dest "$DRIVE_DIR" || warn "drive download exited non-zero -- safe to re-run; already-downloaded files are skipped"
+  "$ICLOUDPD_VENV/bin/python" "$LIBDIR/idrive_download.py" --apple-id "$id" --dest "$DRIVE_DIR" --workers "$IDRIVE_WORKERS" || warn "drive download exited non-zero -- safe to re-run; already-downloaded files are skipped"
   log "files:scan"; occ files:scan --path="${NC_USER}/files/${REL_FILES}" | nostderr | tail -4 | tee -a "$LOG"
   ok "iCloud Drive synced -> $DRIVE_DIR (Files app only, not in Memories)"; }
 
