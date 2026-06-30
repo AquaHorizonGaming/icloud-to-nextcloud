@@ -76,7 +76,8 @@ Many videos export with a junk `0000:00:00` date, so Memories dumps them at "tod
 | `hwaccel`  | Enable GPU/VAAPI transcoding if `/dev/dri` exists |
 | `contacts` | Merge exported vCards into one file for import (`--strip-photos` optional) |
 | `calendars`| Collect exported `.ics` files for import |
-| `drive`    | Migrate **iCloud Drive** documents into `/Files/iCloud` (Files app only, kept out of the Memories timeline) |
+| `drive`    | Import an **iCloud Drive export zip** into `/Files/iCloud` (Files app only, not in Memories) |
+| `drive-pull`| **Live-download iCloud Drive** files via icloudpy (interactive Apple login, no export needed) |
 | `prune`    | Delete the downloaded part zips to reclaim space |
 | `clean`    | Clear scratch (metadata/state/logs) — library untouched |
 | `accounts` | Manage **multiple Nextcloud accounts** and pick which one all photos/files target |
@@ -226,7 +227,21 @@ iCloud *Photos* and iCloud *Drive* are separate exports. To bring your Drive doc
 ./icloud2nc.sh drive /path/to/folder       # already-extracted files
 ```
 
-It extracts into `/Files/iCloud` (stripping Apple's `iCloud Drive/` wrapper), preserves dates, runs a scan, and **keeps everything out of the Memories timeline** so your photo dates stay clean. For *ongoing* sync of new files, point the Nextcloud desktop/mobile app at the `Files/iCloud` folder.
+It extracts into `/Files/iCloud` (stripping Apple's `iCloud Drive/` wrapper), preserves dates, runs a scan, and **keeps everything out of the Memories timeline** so your photo dates stay clean.
+
+### Live download (`drive-pull`) — no export needed
+
+Just like `pull` does for photos, `drive-pull` downloads your iCloud **Drive** straight from Apple using [icloudpy](https://pypi.org/project/icloudpy/) — no waiting on an export zip:
+
+```bash
+./icloud2nc.sh drive-pull                   # prompts for Apple ID, then password + 2FA
+./icloud2nc.sh drive-pull you@example.com   # or pass the Apple ID
+```
+
+- Walks your entire Drive tree and downloads into `/Files/iCloud`, preserving folder structure and modified-times. **Incremental** — files already present at the same size are skipped, so re-runs are cheap.
+- **Auth is interactive and yours** (password + 2FA in the terminal); nothing is stored beyond icloudpy's own session cookie. Needs an interactive terminal for the 2FA prompt.
+- Stays out of the Memories timeline (documents, not photos). First run auto-installs `icloudpy` into the same isolated venv used by `pull`.
+- For *ongoing* sync you can also point the Nextcloud desktop/mobile app at the `Files/iCloud` folder, or schedule `drive-pull` with cron once a session is established.
 
 ---
 
