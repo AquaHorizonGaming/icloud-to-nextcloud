@@ -15,7 +15,13 @@ SKIP = {"all photos", "all videos", "time-lapse", "videos", "slo-mo", "bursts", 
 def get_service(apple_id):
     from icloudpy import ICloudPyService as Svc
     pw = os.environ.get("APPLE_PW") or getpass.getpass("iCloud password for %s: " % apple_id)
-    api = Svc(apple_id, pw)
+    cdir = os.environ.get("ICLOUD2NC_COOKIE_DIR") or os.path.expanduser("~/.icloud2nc-cookies")
+    try: os.makedirs(cdir, exist_ok=True)
+    except Exception: pass
+    try:
+        api = Svc(apple_id, pw, cookie_directory=cdir)
+    except TypeError:
+        api = Svc(apple_id, pw)
     if getattr(api, "requires_2fa", False):
         try:
             if hasattr(api, "trigger_2fa_push_notification"):
@@ -24,9 +30,13 @@ def get_service(apple_id):
             print(">> (could not trigger push: %s)" % e)
         code = input("Enter the 2FA code: ").strip()
         if not api.validate_2fa_code(code): print("ERROR: bad 2FA code"); sys.exit(2)
-        if not getattr(api, "is_trusted_session", True):
-            try: api.trust_session()
-            except Exception: pass
+        try:
+            if api.trust_session():
+                print(">> Session trusted -- 2FA will not be needed again for ~30 days.")
+            else:
+                print(">> Note: could not fully trust the session; 2FA may be asked again.")
+        except Exception as e:
+            print(">> trust_session note: %s" % e)
     elif getattr(api, "requires_2sa", False):
         d = api.trusted_devices[0]; api.send_verification_code(d)
         code = input("Verification code: ").strip()

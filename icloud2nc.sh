@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.14  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.15  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -13,7 +13,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.14"
+VERSION="2.15"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -59,6 +59,7 @@ ICLOUDPD_BIN="${ICLOUDPD_BIN:-icloudpd}"
 ICLOUDPD_VENV="${ICLOUDPD_VENV:-${WORK}/tools/icloudpd-venv}"
 GETPIP_URL="${GETPIP_URL:-https://bootstrap.pypa.io/get-pip.py}"
 ICLOUDPD_COOKIES="${ICLOUDPD_COOKIES:-${WORK}/tools/icloudpd-cookies}"
+ICLOUDPY_COOKIES="${ICLOUDPY_COOKIES:-${WORK}/tools/icloudpy-cookies}"
 FAVCAT='_$!<Favorite>!$_'
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 mkdir -p "$WORK/incoming" "$WORK/metadata" "$STATE" "$LOGDIR" "$LIBDIR" "$ICLOUD_DIR" 2>/dev/null
@@ -620,7 +621,7 @@ drive_pull(){
   banner "iCloud Drive -> $DRIVE_DIR  (account: $NC_USER)"
   warn "icloudpy will prompt for your Apple password + 2FA in THIS terminal."
   warn "This tool does not store or read your credentials; auth is between you and Apple."
-  "$ICLOUDPD_VENV/bin/python" "$LIBDIR/idrive_download.py" --apple-id "$id" --dest "$DRIVE_DIR" --workers "$IDRIVE_WORKERS" || warn "drive download exited non-zero -- safe to re-run; already-downloaded files are skipped"
+  ICLOUD2NC_COOKIE_DIR="$ICLOUDPY_COOKIES" "$ICLOUDPD_VENV/bin/python" "$LIBDIR/idrive_download.py" --apple-id "$id" --dest "$DRIVE_DIR" --workers "$IDRIVE_WORKERS" || warn "drive download exited non-zero -- safe to re-run; already-downloaded files are skipped"
   log "files:scan"; occ files:scan --path="${NC_USER}/files/${REL_FILES}" | nostderr | tail -4 | tee -a "$LOG"
   ok "iCloud Drive synced -> $DRIVE_DIR (Files app only, not in Memories)"; }
 
@@ -640,7 +641,7 @@ pull_albums(){
   warn "icloudpy will prompt for your Apple password + 2FA in THIS terminal."
   warn "This tool does not store or read your credentials; auth is between you and Apple."
   mkdir -p "$WORK/metadata/Albums"
-  "$ICLOUDPD_VENV/bin/python" "$LIBDIR/ialbums_build.py" --apple-id "$id" --out "$WORK/metadata/Albums" || { warn "album fetch failed/cancelled -- safe to re-run"; return 0; }
+  ICLOUD2NC_COOKIE_DIR="$ICLOUDPY_COOKIES" "$ICLOUDPD_VENV/bin/python" "$LIBDIR/ialbums_build.py" --apple-id "$id" --out "$WORK/metadata/Albums" || { warn "album fetch failed/cancelled -- safe to re-run"; return 0; }
   albums
   if [ -s "$WORK/metadata/Albums/Hidden.csv" ] && [ "$(wc -l < "$WORK/metadata/Albums/Hidden.csv")" -gt 1 ]; then
     log "Hidden album retrieved -- moving those items out of the Memories timeline"
