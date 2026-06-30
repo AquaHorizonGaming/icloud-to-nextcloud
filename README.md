@@ -155,7 +155,7 @@ APPLE_ID=you@example.com ./icloud2nc.sh pull
 - Tune with `ICLOUDPD_OPTS`, e.g. `ICLOUDPD_OPTS='--until-found 50'` for fast incremental syncs, or `--recent 500` for just the latest.
 - Note: the `pull` path brings **media only** — album/favorite/hidden reconstruction is exclusive to the export path (those live in the export CSVs).
 
-> First `pull` auto-installs icloudpd with `pip install --user icloudpd` (no root).
+> **Auto-install:** the first `pull` installs icloudpd for you with **no root and no system changes**. On normal boxes it uses `pip install --user`; on **minimized / PEP 668 "externally-managed"** images (no pip, no `ensurepip`, no sudo — common on managed/seedbox hosts) it builds an **isolated venv** under `~/icloud_migration/tools/icloudpd-venv` and bootstraps pip into it from `get-pip.py`, linking the binary at `~/icloud_migration/tools/bin/icloudpd`. `doctor` shows the detected version.
 
 ---
 
@@ -281,6 +281,7 @@ Example: `./icloud2nc.sh --yes import`  ·  `./icloud2nc.sh --dry-run dedupe --r
 - **Favorites view empty** — re-run `albums` (it stars `Favorites.csv`), then refresh the Favorites view.
 - **Duplicate albums** — happens if `albums` was interrupted then re-run; `verify` reports them.
 - **Location missing** — can't be invented; only photos with embedded GPS get mapped.
+- **`pull` says "icloudpd install failed"** — your Python lacks `pip`/`ensurepip` and is PEP 668 "externally-managed" (minimized images). The current tool handles this with an isolated venv automatically; ensure `python3 -m venv` works (`apt install python3-venv` if you have root) and that PyPI + `bootstrap.pypa.io` are reachable. Override the bootstrap source with `GETPIP_URL=...` if needed.
 - **`pull` can't ask for 2FA** — icloudpd needs an interactive terminal for the code; run it in a real SSH/terminal session, not a non-interactive script. Re-run to resume; the session cookie is cached.
 - **`pull` 2FA every time** — the cookie directory isn't persisting; keep the same `$HOME` between runs (icloudpd stores its session under it).
 - **New account shows nothing / scan skipped** — a brand-new Nextcloud user's home isn't created until first login. Log into the web UI once as that user, then `accounts use <name>` and re-run `accounts prep`.
@@ -290,7 +291,7 @@ Example: `./icloud2nc.sh --yes import`  ·  `./icloud2nc.sh --dry-run dedupe --r
 
 ## Requirements
 
-Shell access + `occ`; `unzip`, `python3`, `perl`, `curl`; the Memories app installed; background jobs in **cron** mode. `tools` installs exiftool + ffmpeg without root. The `pull` command auto-installs [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader) via `pip install --user` on first use (needs `python3`/`pip`). For `pull` you also need an interactive terminal so you can enter your Apple 2FA code.
+Shell access + `occ`; `unzip`, `python3`, `perl`, `curl`; the Memories app installed; background jobs in **cron** mode. `tools` installs exiftool + ffmpeg without root. The `pull` command auto-installs [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader) on first use — via `pip install --user`, or (on minimized/PEP 668 systems with no pip) an isolated venv bootstrapped from `get-pip.py`. Needs `python3` with the `venv` module and outbound HTTPS to PyPI; no root required. For `pull` you also need an interactive terminal so you can enter your Apple 2FA code.
 
 ## Files
 
