@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.20  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.21  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -15,7 +15,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.20"
+VERSION="2.21"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -249,6 +249,7 @@ pull(){
   fi
   log "files:scan"; occ files:scan --path="${NC_USER}/files/${REL_ICLOUD}" | nostderr | tail -4 | tee -a "$LOG"
   log "memories:index"; occ memories:index | nostderr | tail -3 | tee -a "$LOG"
+  log "previews (background)"; nohup $OCC preview:generate-all "$NC_USER" >>"$LOGDIR/previews-$NC_USER.log" 2>&1 & disown
   ok "icloudpd sync complete: $(lib_files) files in $ICLOUD_DIR (already dated). Albums/Favorites need the export path."; }
 
 # Schedule icloudpd to AUTO-fetch new photos into each account that has an Apple
@@ -307,6 +308,7 @@ import(){ sync_helpers; _extract
   METADATA_DIR="$WORK/metadata" ICLOUD_DIR="$ICLOUD_DIR" python3 "$LIBDIR/fix_video_dates.py" | tee -a "$LOG"
   log "files:scan"; occ files:scan --path="${NC_USER}/files/${REL_ICLOUD}" | nostderr | tail -4 | tee -a "$LOG"
   log "memories:index"; occ memories:index | nostderr | tail -3 | tee -a "$LOG"
+  log "previews (background)"; nohup $OCC preview:generate-all "$NC_USER" >>"$LOGDIR/previews-$NC_USER.log" 2>&1 & disown
   ok "library imported: $(lib_files) files, $(du -sh "$ICLOUD_DIR" 2>/dev/null | cut -f1)"; }
 
 albums(){ local A="$WORK/metadata/Albums"; [ -d "$A" ] || die "no Albums metadata at $A"
@@ -460,6 +462,10 @@ dedupe(){ banner "Duplicate scan (by content hash)"; local tmp; tmp=$(mktemp)
     awk '{h=$1; $1=""; sub(/^ /,""); if(h==p) print; else p=h}' "$tmp" | while IFS= read -r ff; do maybe rm -f "$ff"; done
     occ files:scan --path="${NC_USER}/files/${REL_ICLOUD}" >/dev/null 2>&1; ok "removed duplicates and re-scanned"
   else echo "  (run: dedupe --remove  to delete extras, keeping one each)"; fi; rm -f "$tmp"; }
+
+previews(){ banner "Generating previews for $NC_USER (background)"
+  nohup $OCC preview:generate-all "$NC_USER" >>"$LOGDIR/previews-$NC_USER.log" 2>&1 & disown
+  ok "preview pre-generation started for $NC_USER (thumbnails fill in as it runs; watch logs/previews-$NC_USER.log)"; }
 
 faces(){ log "clustering faces (Recognize -> Memories People)"
   occ recognize:cluster-faces 2>&1 | nostderr | tail -3; ok "face clustering run (see Memories -> People)"; }
@@ -723,7 +729,7 @@ case "${1:-menu}" in
   archive) acquire_lock; archive; release_lock;; extras) acquire_lock; extras; release_lock;;
   crons) crons;; status) status;; verify) verify;; report) report;; logs) shift; logs "${1:-40}";;
   backup) acquire_lock; backup; release_lock;; dedupe) shift; acquire_lock; dedupe "${1:-}"; release_lock;;
-  faces) faces;; hwaccel) hwaccel;; contacts) shift; contacts "${1:-}";; calendars) calendars;;
+  previews) acquire_lock; previews; release_lock;; faces) faces;; hwaccel) hwaccel;; contacts) shift; contacts "${1:-}";; calendars) calendars;;
   drive) shift; acquire_lock; drive "${1:-}"; release_lock;;
   drive-pull|dpull) shift; acquire_lock; drive_pull "${1:-}"; release_lock;;
   pull-albums|palbums) shift; acquire_lock; pull_albums "${1:-}"; release_lock;;
