@@ -48,6 +48,8 @@ REL_ICLOUD="${ICLOUD_DIR#${NC_FILES}/}"
 REL_FILES="${FILES_DIR#${NC_FILES}/}"
 DRIVE_INCOMING="${DRIVE_INCOMING:-${WORK}/drive_incoming}"
 ICLOUDPD_BIN="${ICLOUDPD_BIN:-icloudpd}"
+ICLOUDPD_VENV="${ICLOUDPD_VENV:-${WORK}/tools/icloudpd-venv}"
+GETPIP_URL="${GETPIP_URL:-https://bootstrap.pypa.io/get-pip.py}"
 FAVCAT='_$!<Favorite>!$_'
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 mkdir -p "$WORK/incoming" "$WORK/metadata" "$STATE" "$LOGDIR" "$LIBDIR" "$ICLOUD_DIR" 2>/dev/null
@@ -104,7 +106,7 @@ doctor(){ local fail=0
   echo "  bg jobs mode : $(occ config:app:get core backgroundjobs_mode)  (want: cron)"
   echo "  exiftool     : $([ -x "$EXIFTOOL" ] && "$EXIFTOOL" -ver || echo 'missing -> run: tools')"
   echo "  ffmpeg       : $([ -x "$FFMPEG" ] && echo ok || echo 'missing -> run: tools')"
-  echo "  icloudpd     : $(command -v icloudpd >/dev/null 2>&1 && icloudpd --version 2>/dev/null | head -1 || echo 'not installed (installed on first: pull)')"
+  echo "  icloudpd     : $(_icloudpd_resolve && "$ICLOUDPD_BIN" --version 2>/dev/null | head -1 || echo 'not installed (auto-installs on first: pull)')"
   echo "  data free    : $(free_gb "$NC_FILES") GB"
   echo "  GPU /dev/dri : $([ -d /dev/dri ] && echo yes || echo 'none (software transcode; fine on many cores)')"
   echo "  php mem_limit: $(php -r 'echo ini_get("memory_limit");' 2>/dev/null)"
@@ -160,16 +162,33 @@ download(){ local list="${1:-$WORK/parts.txt}"
 # interactively: icloudpd prompts for your Apple password + 2FA. This tool
 # never stores or reads your credentials -- auth is between you and Apple.
 # Re-run any time to resume / fetch new photos (a session cookie is cached).
+_icloudpd_resolve(){ local c
+  for c in "$WORK/tools/bin/icloudpd" "$ICLOUDPD_VENV/bin/icloudpd" "$HOME/.local/bin/icloudpd" "$(command -v icloudpd 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { ICLOUDPD_BIN="$c"; return 0; }
+  done; return 1; }
+
+# Make icloudpd "just be there" on any box -- including minimized / PEP 668
+# images with no pip, no ensurepip, no sudo. Strategy: reuse an existing binary;
+# else a quick "pip --user"; else build an isolated venv and bootstrap pip into
+# it from get-pip.py (no system changes, no --break-system-packages).
 _icloudpd_install(){
-  if command -v icloudpd >/dev/null 2>&1; then ICLOUDPD_BIN="$(command -v icloudpd)"; return 0; fi
-  if [ -x "$HOME/.local/bin/icloudpd" ]; then ICLOUDPD_BIN="$HOME/.local/bin/icloudpd"; return 0; fi
-  log "installing icloudpd (pip --user, no root needed)"
-  python3 -m pip install --user --upgrade icloudpd >/dev/null 2>&1 \
-    || pip3 install --user --upgrade icloudpd >/dev/null 2>&1 || true
-  if command -v icloudpd >/dev/null 2>&1; then ICLOUDPD_BIN="$(command -v icloudpd)"
-  elif [ -x "$HOME/.local/bin/icloudpd" ]; then ICLOUDPD_BIN="$HOME/.local/bin/icloudpd"
-  else die "icloudpd install failed; install manually: pip install icloudpd"; fi
-  ok "icloudpd ready: $ICLOUDPD_BIN"; }
+  if _icloudpd_resolve && "$ICLOUDPD_BIN" --version >/dev/null 2>&1; then return 0; fi
+  log "installing icloudpd (isolated venv; no root, no system changes)"
+  if python3 -m pip --version >/dev/null 2>&1; then
+    python3 -m pip install --user --upgrade icloudpd >/dev/null 2>&1 && _icloudpd_resolve \
+      && { ok "icloudpd ready: $($ICLOUDPD_BIN --version 2>/dev/null | head -1)"; return 0; }
+  fi
+  mkdir -p "$WORK/tools/bin"; rm -rf "$ICLOUDPD_VENV"
+  python3 -m venv --without-pip "$ICLOUDPD_VENV" 2>/dev/null || python3 -m venv "$ICLOUDPD_VENV" 2>/dev/null || true
+  [ -x "$ICLOUDPD_VENV/bin/python" ] || die "could not create a python venv (need the python3-venv module)"
+  if ! "$ICLOUDPD_VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+    curl -fsSL -o "$WORK/tools/get-pip.py" "$GETPIP_URL" || die "could not download get-pip.py ($GETPIP_URL)"
+    "$ICLOUDPD_VENV/bin/python" "$WORK/tools/get-pip.py" >/dev/null 2>&1 || die "pip bootstrap into venv failed"
+  fi
+  "$ICLOUDPD_VENV/bin/python" -m pip install --upgrade icloudpd >/dev/null 2>&1 || die "icloudpd install failed (pip)"
+  ln -sf "$ICLOUDPD_VENV/bin/icloudpd" "$WORK/tools/bin/icloudpd"
+  _icloudpd_resolve || die "icloudpd installed but binary not found"
+  ok "icloudpd ready: $($ICLOUDPD_BIN --version 2>/dev/null | head -1)"; }
 
 pull(){
   _icloudpd_install
