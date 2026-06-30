@@ -7,9 +7,9 @@ WITHOUT a download. Interactive Apple auth (password + 2FA); nothing stored.
 import argparse, os, sys, getpass
 
 # Smart/system albums we don't want to recreate as albums (All Photos == timeline).
-SKIP = {"all photos", "all videos", "time-lapse", "videos", "slo-mo", "bursts",
+SKIP = {"all photos", "all videos", "time-lapse", "videos", "slo-mo", "bursts", "live",
         "panoramas", "screenshots", "selfies", "live photos", "portrait",
-        "long exposure", "animated", "recently added", "hidden",
+        "long exposure", "animated", "recently added",
         "recently deleted", "imports", "shared", "my photo stream"}
 
 def get_service(apple_id):
@@ -62,7 +62,8 @@ def main():
             print("WARN album '%s': %s" % (name, e)); continue
         if not files:
             continue
-        out_name = "Favorites" if name.strip().lower() == "favorites" else safe
+        low = name.strip().lower()
+        out_name = "Favorites" if low == "favorites" else ("Hidden" if low == "hidden" else safe)
         with open(os.path.join(a.out, out_name + ".csv"), "w", encoding="utf-8") as fh:
             fh.write("imgName\n")
             for fn in files:

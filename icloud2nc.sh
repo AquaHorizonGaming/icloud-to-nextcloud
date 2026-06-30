@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.13  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.14  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -13,7 +13,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.13"
+VERSION="2.14"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -286,6 +286,7 @@ import(){ sync_helpers; _extract
 albums(){ local A="$WORK/metadata/Albums"; [ -d "$A" ] || die "no Albums metadata at $A"
   mkdir -p "$ALBUMS_DIR"; touch "$ALBUMS_DIR/.nomedia"; local tot=0 na=0
   for csv in "$A"/*.csv; do local name; name=$(basename "$csv" .csv)
+    [ "$name" = "Hidden" ] && continue
     occ photos:albums:create "$NC_USER" "$name" >/dev/null 2>&1; mkdir -p "$ALBUMS_DIR/$name"; na=$((na+1)); local n=0
     while IFS= read -r img; do img=$(printf '%s' "$img" | tr -d '\r' | sed 's/^"//;s/"$//'); [ -z "$img" ] && continue
       [ -f "$ICLOUD_DIR/$img" ] || continue
@@ -641,6 +642,12 @@ pull_albums(){
   mkdir -p "$WORK/metadata/Albums"
   "$ICLOUDPD_VENV/bin/python" "$LIBDIR/ialbums_build.py" --apple-id "$id" --out "$WORK/metadata/Albums" || { warn "album fetch failed/cancelled -- safe to re-run"; return 0; }
   albums
+  if [ -s "$WORK/metadata/Albums/Hidden.csv" ] && [ "$(wc -l < "$WORK/metadata/Albums/Hidden.csv")" -gt 1 ]; then
+    log "Hidden album retrieved -- moving those items out of the Memories timeline"
+    archive
+  else
+    warn "no Hidden members retrieved (Apple often does not expose the Hidden album via the API)"
+  fi
 }
 
 prune(){ confirm "Delete the downloaded part zips in $WORK/incoming to reclaim space?" || { warn "cancelled"; return 0; }
