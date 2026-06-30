@@ -1,9 +1,9 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.6  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.7  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
-#  accounts = manage multiple Nextcloud accounts and pick the migration target
+#  accounts = list ALL Nextcloud users and pick which one is the migration target
 #  autopull = schedule icloudpd to auto-fetch NEW photos into the right account
 #  drive-pull = live-download iCloud DRIVE files (icloudpy) into /Files/iCloud
 #  Two ways to GET photos: (1) privacy.apple.com export -> download, or
@@ -12,7 +12,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.6"
+VERSION="2.7"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -496,13 +496,16 @@ accounts(){ local sub="${1:-list}"; [ $# -gt 0 ] && shift
     *) echo "usage: accounts [list | add <name> [email] | use <name> | current | remove <name> | prep]";;
   esac; }
 
-_accounts_list(){ banner "Accounts"
-  shopt -s nullglob; local f n u found=0
-  for f in "$ACCT_DIR"/*.conf; do found=1; n=$(basename "$f" .conf); u=$(. "$f"; echo "$NC_USER")
-    if [ "$n" = "${ACTIVE_ACCT:-}" ]; then printf '  * %-16s NC user: %s   (ACTIVE)\n' "$n" "$u"
-    else printf '    %-16s NC user: %s\n' "$n" "$u"; fi; done
-  [ "$found" = 0 ] && echo "  (no profiles yet -- add one:  accounts add <name>)"
-  echo "  in use right now -> NC_USER=$NC_USER"; }
+_nc_users(){ occ user:list 2>/dev/null | nostderr | sed -n 's/^[[:space:]]*-[[:space:]]*\([^:]*\):.*/\1/p'; }
+
+_accounts_list(){ banner "Nextcloud accounts (all users on this server)"
+  local u; while IFS= read -r u; do [ -z "$u" ] && continue
+    if [ "$u" = "$NC_USER" ]; then printf '  * %-20s (ACTIVE)%s\n' "$u" "$([ -f "$ACCT_DIR/$u.conf" ] && echo '  [profile]')"
+    else printf '    %-20s%s\n' "$u" "$([ -f "$ACCT_DIR/$u.conf" ] && echo '  [profile]')"; fi
+  done < <(_nc_users)
+  echo
+  echo "  active NC user: $NC_USER"
+  echo "  switch:  accounts use <username>      store Apple ID/email:  accounts add <name> [email]"; }
 
 _accounts_add(){ local name="$1" email="${2:-}"; [ -n "$name" ] || read -r -p "Profile label: " name
   [ -n "$name" ] || { warn "no name"; return 1; }
@@ -526,11 +529,20 @@ _accounts_add(){ local name="$1" email="${2:-}"; [ -n "$name" ] || read -r -p "P
   _account_prep "$uid"
   echo "$name" > "$CURRENT_FILE"; ok "active account -> $name (all photos/files now target '$uid')"; }
 
-_accounts_use(){ local name="$1"; [ -n "$name" ] || { _accounts_list; read -r -p "use which profile? " name; }
-  { [ -n "$name" ] && [ -f "$ACCT_DIR/$name.conf" ]; } || { warn "no such profile: $name"; return 1; }
-  echo "$name" > "$CURRENT_FILE"
-  local u; u=$(. "$ACCT_DIR/$name.conf"; echo "$NC_USER")
-  ok "active account -> $name (NC user '$u'). All commands now target this account."; }
+_accounts_use(){ local name="$1"
+  [ -n "$name" ] || { _accounts_list; read -r -p "use which account (username)? " name; }
+  [ -n "$name" ] || { warn "no account given"; return 1; }
+  if [ -f "$ACCT_DIR/$name.conf" ]; then
+    echo "$name" > "$CURRENT_FILE"; local u; u=$(. "$ACCT_DIR/$name.conf"; echo "$NC_USER")
+    ok "active account -> $name (NC user '$u'). All commands now target it."; return 0
+  fi
+  if occ user:info "$name" >/dev/null 2>&1; then
+    { echo "# icloud2nc account profile (auto)"; echo "NC_USER=\"$name\""; } > "$ACCT_DIR/$name.conf"
+    echo "$name" > "$CURRENT_FILE"
+    ok "active account -> $name (existing Nextcloud user; profile created). All commands now target it."
+    echo "  Tip: 'accounts add $name you@icloud.com' to also store an Apple ID for pull/autopull."; return 0
+  fi
+  warn "no profile and no Nextcloud user called '$name'. Available users:"; _nc_users | sed 's/^/    /'; return 1; }
 
 _accounts_remove(){ local name="$1"; [ -n "$name" ] || { warn "which profile?"; return 1; }
   [ -f "$ACCT_DIR/$name.conf" ] || { warn "no such profile: $name"; return 1; }

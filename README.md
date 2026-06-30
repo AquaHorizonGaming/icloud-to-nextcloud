@@ -196,6 +196,7 @@ Migrate more than one person's library — each Nextcloud user is a saved **prof
 ```
 
 - `accounts add` asks for the Nextcloud username, offers to **create that user** if it doesn't exist (you type the password — the tool passes it straight to `occ user:add` and never stores it), optionally saves an Apple ID for `pull`, then prepares that user's `Photos/Icloud` + `Files/iCloud` folders and points Memories at the right path.
+- `accounts list` shows **every Nextcloud user on the server** (marking the active one and which have profiles). `accounts use <username>` selects any existing user — even one you didn't create with the tool — auto-creating a lightweight profile. Usernames are **case-sensitive** (e.g. `Aqua`, not `aqua`).
 - The active account is remembered in `~/.config/icloud2nc/current`; profiles live in `~/.config/icloud2nc/accounts/<name>.conf`.
 - Every command (`download`, `pull`, `import`, `albums`, `drive`, `status`, …) automatically uses the selected account's user and paths. No active account = the default in the CONFIG block.
 
