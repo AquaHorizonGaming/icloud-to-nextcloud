@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.11  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.12  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -12,7 +12,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.11"
+VERSION="2.12"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -51,8 +51,8 @@ FFMPEG_URL="${FFMPEG_URL:-https://johnvansickle.com/ffmpeg/releases/ffmpeg-relea
 STATE="${WORK}/state"; LOGDIR="${WORK}/logs"; LIBDIR="${WORK}/lib"
 LOG="${LOGDIR}/icloud2nc-$(date +%Y%m%d).log"
 LOCK="${WORK}/.lock"
-REL_ICLOUD="${ICLOUD_DIR#${NC_FILES}/}"
-REL_FILES="${FILES_DIR#${NC_FILES}/}"
+REL_ICLOUD="${ICLOUD_DIR#"${NC_FILES}"/}"
+REL_FILES="${FILES_DIR#"${NC_FILES}"/}"
 DRIVE_INCOMING="${DRIVE_INCOMING:-${WORK}/drive_incoming}"
 ICLOUDPD_BIN="${ICLOUDPD_BIN:-icloudpd}"
 ICLOUDPD_VENV="${ICLOUDPD_VENV:-${WORK}/tools/icloudpd-venv}"
@@ -93,6 +93,7 @@ _dbget(){ $OCC config:system:get "$1" 2>/dev/null; }
 PFX_CACHE=""; pfx(){ [ -z "$PFX_CACHE" ] && PFX_CACHE="$(_dbget dbtableprefix)"; echo "${PFX_CACHE:-oc_}"; }
 q(){ local u pw n; u=$(_dbget dbuser); pw=$(_dbget dbpassword); n=$(_dbget dbname)
   mysql -h"$DB_HOST" -P"$DB_PORT" -u"$u" -p"$pw" "$n" -N -e "$1" 2>/dev/null; }
+_home_sid(){ q "SELECT numeric_id FROM $(pfx)storages WHERE id='home::${NC_USER}' LIMIT 1;"; }
 
 gb(){ awk "BEGIN{printf \"%.1f\", $1/1073741824}"; }
 free_gb(){ df -PB1 "$1" 2>/dev/null | awk 'NR==2{printf "%.0f",$4/1073741824}'; }
@@ -160,7 +161,7 @@ EOF
 
 download(){ local list="${1:-$WORK/parts.txt}"
   [ -f "$list" ] || die "create $list with lines: <part-number> <url>  (see: links)"
-  cd "$WORK/incoming"; local n=0
+  cd "$WORK/incoming" || die "cannot enter $WORK/incoming"; local n=0
   while read -r num url; do [ -z "${num:-}" ] && continue; case "$num" in \#*) continue;; esac
     log "download part $num"; nohup curl -sL -o "iCloud Photos Part ${num} of 21.zip" "$url" >/dev/null 2>&1 & n=$((n+1)); done < "$list"
   disown -a; ok "$n downloads started + detached (survive disconnect). Watch: ls -lah $WORK/incoming"; }
@@ -290,7 +291,7 @@ albums(){ local A="$WORK/metadata/Albums"; [ -d "$A" ] || die "no Albums metadat
       occ photos:albums:add "$NC_USER" "$name" "${REL_ICLOUD}/$img" >/dev/null 2>&1
       ln -f "$ICLOUD_DIR/$img" "$ALBUMS_DIR/$name/$img" 2>/dev/null; n=$((n+1)); done < <(tail -n +2 "$csv")
     tot=$((tot+n)); log "   $name: $n"; done
-  occ files:scan --path="${NC_USER}/files/Photos/Albums" >/dev/null 2>&1
+  occ files:scan --path="${NC_USER}/files/${ALBUMS_DIR#"${NC_FILES}"/}" >/dev/null 2>&1
   _star_favorites "$A/Favorites.csv"
   ok "albums done: $na albums (Memories + folders), $tot memberships"; }
 
@@ -326,20 +327,20 @@ crons(){ sync_helpers; local occdir; occdir=$(dirname "${OCC##* }")
   ICLOUD_DIR="$ICLOUD_DIR" EXIFTOOL="$EXIFTOOL" python3 "$LIBDIR/autodate.py" >/dev/null 2>&1
   ok "automation installed (index /15m, filename-date fixup /30m)"; crontab -l | grep -E "memories:index|autodate"; }
 
-status(){ local P na nf nfav; P=$(pfx)
+status(){ local P na nf nfav _sid; P=$(pfx); _sid=$(_home_sid)
   na=$(q "SELECT COUNT(*) FROM ${P}photos_albums a WHERE a.user='${NC_USER}';")
   nf=$(ls "$ALBUMS_DIR" 2>/dev/null | grep -v '^\.' | wc -l)
   nfav=$(q "SELECT COUNT(*) FROM ${P}vcategory_to_object o JOIN ${P}vcategory c ON o.categoryid=c.id WHERE c.uid='${NC_USER}' AND c.category='$FAVCAT';")
   echo "  library files : $(lib_files)"
   echo "  library size  : $(du -sh "$ICLOUD_DIR" 2>/dev/null | cut -f1)"
-  echo "  memories rows : $(q "SELECT COUNT(*) FROM ${P}memories;")"
+  echo "  memories rows : $(q "SELECT COUNT(*) FROM ${P}memories m JOIN ${P}filecache f ON f.fileid=m.fileid WHERE f.storage='${_sid}';")"
   echo "  albums        : $na"
   echo "  album folders : $nf"
   echo "  favorites     : $nfav"
   echo "  data free     : $(free_gb "$NC_FILES") GB"; }
 
-verify(){ local P items today na nf dups nfav; P=$(pfx); banner "Integrity check"
-  items=$(q "SELECT COUNT(*) FROM ${P}memories;"); today=$(q "SELECT COUNT(*) FROM ${P}memories WHERE datetaken >= CURDATE();")
+verify(){ local P items today na nf dups nfav _sid; P=$(pfx); _sid=$(_home_sid); banner "Integrity check"
+  items=$(q "SELECT COUNT(*) FROM ${P}memories m JOIN ${P}filecache f ON f.fileid=m.fileid WHERE f.storage='${_sid}';"); today=$(q "SELECT COUNT(*) FROM ${P}memories m JOIN ${P}filecache f ON f.fileid=m.fileid WHERE f.storage='${_sid}' AND m.datetaken >= CURDATE();")
   na=$(q "SELECT COUNT(*) FROM ${P}photos_albums a WHERE a.user='${NC_USER}';")
   nf=$(ls "$ALBUMS_DIR" 2>/dev/null | grep -v '^\.' | wc -l)
   dups=$(q "SELECT COUNT(*) FROM (SELECT a.name FROM ${P}photos_albums a WHERE a.user='${NC_USER}' GROUP BY a.name HAVING COUNT(*)>1) x;")
@@ -543,7 +544,7 @@ _load_account(){ local name="$1"
   ALBUMS_DIR="${ALBUMS_DIR:-${NC_FILES}/Photos/Albums}"
   FILES_DIR="${FILES_DIR:-${NC_FILES}/Files}"
   DRIVE_DIR="${DRIVE_DIR:-${FILES_DIR}/iCloud}"
-  REL_ICLOUD="${ICLOUD_DIR#${NC_FILES}/}"; REL_FILES="${FILES_DIR#${NC_FILES}/}"; }
+  REL_ICLOUD="${ICLOUD_DIR#"${NC_FILES}"/}"; REL_FILES="${FILES_DIR#"${NC_FILES}"/}"; }
 
 _accounts_use(){ local name="$1"
   [ -n "$name" ] || { _accounts_list; read -r -p "use which account (username)? " name; }
