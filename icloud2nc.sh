@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.18  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.19  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -14,7 +14,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.18"
+VERSION="2.19"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -663,11 +663,12 @@ _iextract(){ _idrive_install; sync_helpers
   warn "icloudpy will prompt for your Apple password + 2FA in THIS terminal."
   warn "This tool does not store or read your credentials; auth is between you and Apple."
   ICLOUD2NC_COOKIE_DIR="$ICLOUDPY_COOKIES" "$ICLOUDPD_VENV/bin/python" "$LIBDIR/iextract.py" --apple-id "$id" --kind "$kind" --out "$out" || { warn "$kind export failed/cancelled -- safe to re-run"; return 0; }
-  # drop a copy into the user's Files area so it's downloadable from the web UI
-  mkdir -p "$FILES_DIR/iCloud-export" 2>/dev/null
-  cp -f "$out" "$FILES_DIR/iCloud-export/" 2>/dev/null
-  occ files:scan --path="${NC_USER}/files/${REL_FILES}" >/dev/null 2>&1
-  ok "$kind exported -> $out  (also in Files: ${REL_FILES}/iCloud-export/$(basename "$out"))"; }
+  # drop a copy at the TOP of the user's Nextcloud files so it's easy to find + import
+  local expdir="$NC_FILES/iCloud-Exports"
+  mkdir -p "$expdir" 2>/dev/null
+  cp -f "$out" "$expdir/" 2>/dev/null
+  occ files:scan --path="${NC_USER}/files/iCloud-Exports" >/dev/null 2>&1
+  ok "$kind exported -> open Nextcloud Files -> iCloud-Exports/$(basename "$out")"; }
 
 contacts_pull(){ _iextract contacts "$WORK/icloud-contacts.vcf" "${1:-}"
   echo "  Import: Nextcloud -> Contacts app -> Settings (bottom-left) -> Import -> upload the .vcf"; }
