@@ -431,12 +431,12 @@ drive(){
 accounts(){ local sub="${1:-list}"; [ $# -gt 0 ] && shift
   case "$sub" in
     list|ls) _accounts_list;;
-    add|new) _accounts_add "${1:-}";;
+    add|new) _accounts_add "${1:-}" "${2:-}";;
     use|select|switch) _accounts_use "${1:-}";;
     current|who) echo "active account: ${ACTIVE_ACCT:-<default>}  (NC user: $NC_USER)";;
     remove|rm|del) _accounts_remove "${1:-}";;
     prep) _account_prep "$NC_USER";;
-    *) echo "usage: accounts [list | add <name> | use <name> | current | remove <name> | prep]";;
+    *) echo "usage: accounts [list | add <name> [email] | use <name> | current | remove <name> | prep]";;
   esac; }
 
 _accounts_list(){ banner "Accounts"
@@ -447,7 +447,7 @@ _accounts_list(){ banner "Accounts"
   [ "$found" = 0 ] && echo "  (no profiles yet -- add one:  accounts add <name>)"
   echo "  in use right now -> NC_USER=$NC_USER"; }
 
-_accounts_add(){ local name="$1"; [ -n "$name" ] || read -r -p "Profile label: " name
+_accounts_add(){ local name="$1" email="${2:-}"; [ -n "$name" ] || read -r -p "Profile label: " name
   [ -n "$name" ] || { warn "no name"; return 1; }
   local uid; read -r -p "Nextcloud username (uid) [$name]: " uid; uid="${uid:-$name}"
   if ! occ user:info "$uid" >/dev/null 2>&1; then
@@ -459,9 +459,13 @@ _accounts_add(){ local name="$1"; [ -n "$name" ] || read -r -p "Profile label: "
       unset pw pw2
     else warn "not creating; profile will still point at '$uid'"; fi
   fi
+  [ -n "$email" ] || read -r -p "Email for $uid (optional): " email
+  if [ -n "$email" ]; then
+    occ user:setting "$uid" settings email "$email" >/dev/null 2>&1 && ok "email set: $email" || warn "could not set email (does the user exist yet?)"
+  fi
   local aid; read -r -p "Apple ID for this account (optional, for 'pull'): " aid
-  { echo "# icloud2nc account profile"; echo "NC_USER=\"$uid\""; [ -n "$aid" ] && echo "APPLE_ID=\"$aid\""; } > "$ACCT_DIR/$name.conf"
-  ok "saved profile '$name' -> NC user '$uid'"
+  { echo "# icloud2nc account profile"; echo "NC_USER=\"$uid\""; [ -n "$email" ] && echo "ACCT_EMAIL=\"$email\""; [ -n "$aid" ] && echo "APPLE_ID=\"$aid\""; } > "$ACCT_DIR/$name.conf"
+  ok "saved profile '$name' -> NC user '$uid' (email + Apple ID stored if given)"
   _account_prep "$uid"
   echo "$name" > "$CURRENT_FILE"; ok "active account -> $name (all photos/files now target '$uid')"; }
 
