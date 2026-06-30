@@ -4,8 +4,7 @@ in the same one-filename-per-line format the privacy.apple.com export uses, so
 icloud2nc's 'albums' step can rebuild Memories albums + folder views + favorites
 WITHOUT a download. Interactive Apple auth (password + 2FA); nothing stored.
 """
-import argparse, os, sys, getpass
-import sys, os
+import argparse, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from iauth import get_service  # shared auth (2FA + SMS fallback)
 

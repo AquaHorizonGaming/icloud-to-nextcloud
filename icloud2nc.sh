@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.23  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.24  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -15,7 +15,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.23"
+VERSION="2.24"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -443,7 +443,7 @@ M
 
 usage(){ sed -n '2,10p' "$0"; }
 
-backup(){ local d="$WORK/backups/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$d"
+backup(){ local d; d="$WORK/backups/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$d"
   log "backing up DB + config -> $d"
   local u pw n; u=$(_dbget dbuser); pw=$(_dbget dbpassword); n=$(_dbget dbname)
   mysqldump --single-transaction --no-tablespaces -h"$DB_HOST" -P"$DB_PORT" -u"$u" -p"$pw" "$n" > "$d/nextcloud-db.sql" 2>/dev/null \
