@@ -90,14 +90,47 @@ def ics(events):
     return "\r\n".join(out) + "\r\n"
 
 
+def vtodos(lists):
+    stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//icloud2nc//iCloud reminders//EN", "CALSCALE:GREGORIAN"]
+    n = 0
+    for listname, items in (lists or {}).items():
+        for it in items or []:
+            out.append("BEGIN:VTODO")
+            out.append("UID:icloud2nc-%d-%s" % (n, stamp)); n += 1
+            out.append("DTSTAMP:%s" % stamp)
+            out.append("SUMMARY:%s" % esc(it.get("title", "")))
+            if it.get("desc"):
+                out.append("DESCRIPTION:%s" % esc(it["desc"]))
+            due = it.get("due")
+            if due is not None:
+                try:
+                    out.append("DUE:%04d%02d%02dT%02d%02d00" % (due.year, due.month, due.day, due.hour, due.minute))
+                except Exception:
+                    pass
+            if listname:
+                out.append("CATEGORIES:%s" % esc(listname))
+            out.append("STATUS:NEEDS-ACTION")
+            out.append("END:VTODO")
+    out.append("END:VCALENDAR")
+    return "\r\n".join(out) + "\r\n", n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apple-id", required=True)
-    ap.add_argument("--kind", required=True, choices=["contacts", "calendar"])
+    ap.add_argument("--kind", required=True, choices=["contacts", "calendar", "reminders"])
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     api = get_service(a.apple_id)
-    if a.kind == "contacts":
+    if a.kind == "reminders":
+        rem = api.reminders
+        lists = getattr(rem, "lists", {}) or {}
+        data, n = vtodos(lists)
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        print("DONE wrote %d reminders -> %s" % (n, a.out))
+    elif a.kind == "contacts":
         cs = api.contacts.all() or []
         with open(a.out, "w", encoding="utf-8") as fh:
             fh.write(vcards(cs))

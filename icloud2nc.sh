@@ -1,20 +1,21 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.19  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.20  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
 #  autopull = schedule icloudpd to auto-fetch NEW photos into the right account
 #  drive-pull = live-download iCloud DRIVE files (icloudpy) into /Files/iCloud
 #  pull-albums = rebuild albums on the LIVE path (icloudpy) -- no export needed
-#  contacts-pull / calendars-pull = live-export iCloud Contacts/Calendar (icloudpy)
+#  contacts-pull / calendars-pull / reminders-pull = live-export Contacts/Calendar/Reminders
+#  alerts = notify (Nextcloud + optional email) when a scheduled sync needs re-auth
 #  Two ways to GET photos: (1) privacy.apple.com export -> download, or
 #  (2) pull = direct download via icloudpd (interactive Apple login).
 #  Photos land in /Photos (Memories); iCloud Drive docs land in /Files/iCloud.
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.19"
+VERSION="2.20"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -44,6 +45,7 @@ ICLOUDPD_OPTS="${ICLOUDPD_OPTS:-}"
 AUTOPULL_CRON="${AUTOPULL_CRON:-0 */6 * * *}"   # how often autopull checks iCloud
 ICLOUDPD_UNTIL="${ICLOUDPD_UNTIL:-100}"        # incremental: stop after N already-downloaded
 IDRIVE_WORKERS="${IDRIVE_WORKERS:-8}"          # parallel iCloud Drive downloads (drive-pull)
+ALERT_EMAIL="${ALERT_EMAIL:-}"                 # optional: also email alerts here (uses Nextcloud SMTP)
 # ============================================================================
 
 EXIFTOOL="${WORK}/tools/bin/exiftool"
@@ -97,6 +99,28 @@ PFX_CACHE=""; pfx(){ [ -z "$PFX_CACHE" ] && PFX_CACHE="$(_dbget dbtableprefix)";
 q(){ local u pw n; u=$(_dbget dbuser); pw=$(_dbget dbpassword); n=$(_dbget dbname)
   mysql -h"$DB_HOST" -P"$DB_PORT" -u"$u" -p"$pw" "$n" -N -e "$1" 2>/dev/null; }
 _home_sid(){ q "SELECT numeric_id FROM $(pfx)storages WHERE id='home::${NC_USER}' LIMIT 1;"; }
+# Notify the user something needs attention: a Nextcloud notification (always)
+# and, if ALERT_EMAIL is set, an email via Nextcloud's configured SMTP.
+_alert(){ local subj="$1" body="$2"
+  occ notification:generate "$NC_USER" "$subj" -l "$body" >/dev/null 2>&1 && log "alerted $NC_USER in Nextcloud" || warn "could not post Nextcloud notification"
+  [ -n "${ALERT_EMAIL:-}" ] || return 0
+  local host port from
+  host=$(_dbget mail_smtphost); port=$(_dbget mail_smtpport); from="$(_dbget mail_from_address)@$(_dbget mail_domain)"
+  [ -n "$host" ] || { warn "no SMTP configured; skipped email"; return 0; }
+  ALERT_TO="$ALERT_EMAIL" ALERT_FROM="$from" ALERT_HOST="$host" ALERT_PORT="${port:-587}" ALERT_SUBJ="$subj" ALERT_BODY="$body" python3 - <<'PYEOF' 2>/dev/null && log "emailed alert to $ALERT_EMAIL" || warn "email alert failed (non-fatal)"
+import os, smtplib
+from email.message import EmailMessage
+m=EmailMessage(); m["From"]=os.environ["ALERT_FROM"]; m["To"]=os.environ["ALERT_TO"]
+m["Subject"]=os.environ["ALERT_SUBJ"]; m.set_content(os.environ["ALERT_BODY"])
+s=smtplib.SMTP(os.environ["ALERT_HOST"], int(os.environ["ALERT_PORT"]), timeout=20)
+try: s.starttls()
+except Exception: pass
+s.send_message(m); s.quit()
+PYEOF
+}
+alerts(){ case "${1:-show}" in
+    test) _alert "icloud2nc: test alert" "This is a test alert for $NC_USER. Nextcloud notification + ${ALERT_EMAIL:-no email set}."; ok "test alert sent";;
+    *) echo "  alerts: Nextcloud notification to '$NC_USER'${ALERT_EMAIL:+ + email to $ALERT_EMAIL}"; echo "  set an email with: ALERT_EMAIL=you@example.com (or in ~/.config/icloud2nc.conf)"; echo "  test with: alerts test";; esac; }
 
 gb(){ awk "BEGIN{printf \"%.1f\", $1/1073741824}"; }
 free_gb(){ df -PB1 "$1" 2>/dev/null | awk 'NR==2{printf "%.0f",$4/1073741824}'; }
@@ -217,7 +241,7 @@ pull(){
   banner "icloudpd -> $ICLOUD_DIR  (account: $NC_USER)"
   if [ "$auto" = 1 ]; then
     log "autopull (incremental, --until-found $ICLOUDPD_UNTIL) for $NC_USER as $id"
-    "$ICLOUDPD_BIN" --directory "$ICLOUD_DIR" --username "$id" --size original --live-photo-size original --set-exif-datetime --folder-structure none --no-progress-bar --until-found "$ICLOUDPD_UNTIL" ${ICLOUDPD_OPTS:-} </dev/null || { warn "icloudpd auto run failed -- the iCloud session likely expired; run 'pull' interactively once to re-auth (2FA)"; return 0; }
+    "$ICLOUDPD_BIN" --directory "$ICLOUD_DIR" --username "$id" --size original --live-photo-size original --set-exif-datetime --folder-structure none --no-progress-bar --until-found "$ICLOUDPD_UNTIL" ${ICLOUDPD_OPTS:-} </dev/null || { warn "icloudpd auto run failed -- the iCloud session likely expired"; _alert "icloud2nc: re-auth needed for $NC_USER" "The scheduled iCloud photo sync for '$NC_USER' could not run -- the iCloud session has likely expired. Run '$SELF pull' interactively (enter password + 2FA) to re-establish it."; return 0; }
   else
     warn "icloudpd will prompt for your Apple password + 2FA in THIS terminal."
     warn "This tool does not store or read your credentials; auth is between you and Apple."
@@ -395,7 +419,8 @@ menu(){ while true; do
  16) hwaccel  17) contacts 18) calendars 19) prune  20) clean
  21) drive (Drive export zip)   22) pull (icloudpd photos)   23) accounts
  24) autopull (auto new photos) 25) drive-pull (live iCloud Drive)  26) pull-albums (rebuild albums)
- 27) contacts-pull (live Contacts)   28) calendars-pull (live Calendar)        q) quit
+ 27) contacts-pull (Contacts)  28) calendars-pull (Calendar)  29) reminders-pull (Reminders)
+ 30) alerts (test/show)                                   q) quit
 M
   read -r -p "choose: " ch; case "$ch" in
     1) doctor;; 2) acquire_lock; tools; release_lock;; 3) links;; 4) acquire_lock; download; release_lock;;
@@ -409,6 +434,7 @@ M
     25) acquire_lock; drive_pull; release_lock;;
     26) acquire_lock; pull_albums; release_lock;;
     27) acquire_lock; contacts_pull; release_lock;; 28) acquire_lock; calendars_pull; release_lock;;
+    29) acquire_lock; reminders_pull; release_lock;; 30) alerts show;;
     q|Q) break;; *) warn "?";; esac
   done; }
 
@@ -676,6 +702,9 @@ contacts_pull(){ _iextract contacts "$WORK/icloud-contacts.vcf" "${1:-}"
 calendars_pull(){ _iextract calendar "$WORK/icloud-calendar.ics" "${1:-}"
   echo "  Import: Nextcloud -> Calendar app -> Settings -> Import -> upload the .ics"; }
 
+reminders_pull(){ _iextract reminders "$WORK/icloud-reminders.ics" "${1:-}"
+  echo "  Import: Nextcloud -> Tasks (or Calendar) -> Import -> upload the .ics (todos show in the Tasks app)"; }
+
 prune(){ confirm "Delete the downloaded part zips in $WORK/incoming to reclaim space?" || { warn "cancelled"; return 0; }
   local b; b=$(du -sh "$WORK/incoming" 2>/dev/null | cut -f1); maybe rm -f "$WORK"/incoming/*.zip; ok "removed downloaded zips (freed ~${b:-0})"; }
 
@@ -700,6 +729,8 @@ case "${1:-menu}" in
   pull-albums|palbums) shift; acquire_lock; pull_albums "${1:-}"; release_lock;;
   contacts-pull|cpull) shift; acquire_lock; contacts_pull "${1:-}"; release_lock;;
   calendars-pull|calpull) shift; acquire_lock; calendars_pull "${1:-}"; release_lock;;
+  reminders-pull|rpull) shift; acquire_lock; reminders_pull "${1:-}"; release_lock;;
+  alerts) shift; alerts "${1:-show}";;
   accounts|account) shift; accounts "$@";;
   prune) acquire_lock; prune; release_lock;; clean) clean;;
   resume) resume;; all) all;; menu) menu;; help|-h|--help) usage;; *) err "unknown: $1"; usage;;
