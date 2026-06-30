@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  icloud2nc  v2.10  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
+#  icloud2nc  v2.11  -- all-in-one iCloud Photos + Drive -> Nextcloud/Memories
 #  No args = interactive menu. Subcommands: doctor tools links download pull
 #  import albums archive extras crons status verify report logs resume all drive
 #  accounts = list ALL Nextcloud users and pick which one is the migration target
@@ -12,7 +12,7 @@
 #  Every stage is resumable + logged. Safe to re-run. Edit the CONFIG block.
 # ============================================================================
 set -uo pipefail
-VERSION="2.10"
+VERSION="2.11"
 [ -f "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}" ] && . "${ICLOUD2NC_CONF:-$HOME/.config/icloud2nc.conf}"
 
 # ---- multi-account: load the selected account profile (sets NC_USER etc.) ---
@@ -74,7 +74,8 @@ banner(){ printf '\n%s== %s ==%s\n' "$B" "$*" "$R" | tee -a "$LOG"; }
 confirm(){ [ "$ASSUME_YES" = 1 ] && return 0; read -r -p "$* [y/N] " a; [[ "$a" =~ ^[Yy]$ ]]; }
 maybe(){ if [ "${DRY:-0}" = 1 ]; then echo "  [dry-run] $*"; else "$@"; fi; }
 
-acquire_lock(){ if mkdir "$LOCK" 2>/dev/null; then echo $$ >"$LOCK/pid"; trap release_lock EXIT INT TERM
+_on_int(){ printf '\n'; err "interrupted -- exiting"; release_lock; exit 130; }
+acquire_lock(){ if mkdir "$LOCK" 2>/dev/null; then echo $$ >"$LOCK/pid"; trap release_lock EXIT; trap _on_int INT TERM
   else local p; p=$(cat "$LOCK/pid" 2>/dev/null); if kill -0 "$p" 2>/dev/null; then die "another run active (pid $p); remove $LOCK if stale"; else rm -rf "$LOCK"; acquire_lock; fi; fi; }
 release_lock(){ rm -rf "$LOCK" 2>/dev/null; }
 
