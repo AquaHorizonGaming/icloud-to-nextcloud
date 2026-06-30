@@ -14,6 +14,11 @@ def say(m):
     with _plock:
         print(m, flush=True)
 
+EXCL = []
+def _excluded(rel):
+    rl = "/" + rel.lower()
+    return any(e in rl for e in EXCL)
+
 def fetch(item, out):
     resp = item.open(stream=True)
     raw = getattr(resp, "raw", None)
@@ -54,6 +59,8 @@ def walk_stream(node, dest, rel, st, submit):
         t = getattr(item, "type", None)
         relpath = (rel + "/" + name).lstrip("/")
         if t in ("folder", "app_library"):
+            if _excluded(relpath):
+                say(">> skipping /%s (excluded)" % relpath); continue
             walk_stream(item, dest, relpath, st, submit)
         else:
             out = os.path.join(dest, relpath)
@@ -68,8 +75,12 @@ def main():
     ap.add_argument("--apple-id", required=True)
     ap.add_argument("--dest", required=True)
     ap.add_argument("--workers", type=int, default=int(os.environ.get("IDRIVE_WORKERS", "8")))
+    ap.add_argument("--exclude", default=os.environ.get("IDRIVE_EXCLUDE", ""), help="comma-separated folder name/path substrings to skip")
     a = ap.parse_args()
     workers = max(1, min(a.workers, 32))
+    EXCL[:] = [e.strip().lower() for e in (a.exclude or "").split(",") if e.strip()]
+    if EXCL:
+        print("Skipping folders matching: %s" % ", ".join(EXCL), flush=True)
     api = get_service(a.apple_id)
     try:
         drive = api.drive
